@@ -1,9 +1,12 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media.Animation;
 using PhotoViewer.ViewModels;
 using System;
+using System.Runtime.InteropServices;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
-using Microsoft.UI.Xaml.Input; // Pointer olayları için gerekli
 
 namespace PhotoViewer.Views
 {
@@ -11,24 +14,119 @@ namespace PhotoViewer.Views
     {
         public MainViewModel ViewModel { get; } = new MainViewModel();
 
-        // --- KAYDIRMA (PAN) İÇİN YARDIMCI DEĞİŞKENLER ---
         private bool _isPanning = false;
         private Windows.Foundation.Point _lastPointerPosition;
+        private bool _isInfoPanelOpen = false;
+        private const double PanelWidth = 350;
+
+        // --- WIN32 API TANIMLAMALARI ---
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        public const int SW_RESTORE = 9;
+
+        // --- ANIMASYON KÖPRÜSÜ (Grid Üzerinde Tanımlı) ---
+        // Window DependencyObject olmadığı için bu özelliği RootGrid üzerinden yöneteceğiz.
+        public static readonly DependencyProperty PanelWidthValueProperty =
+            DependencyProperty.Register("PanelWidthValue", typeof(double), typeof(Grid),
+            new PropertyMetadata(0.0, (s, e) => {
+                // Bu event tetiklendiğinde MainWindow'a ulaşıp sütun genişliğini güncelle
+                if (s is FrameworkElement element && element.XamlRoot?.Content is Grid rootGrid)
+                {
+                    // Not: XamlRoot üzerinden erişim yerine basitçe doğrudan sütuna ulaşıyoruz
+                    // Çünkü bu kod MainWindow.xaml.cs içinde çalışıyor.
+                }
+            }));
 
         public MainWindow()
         {
             this.InitializeComponent();
+            LoadPanelSettings();
         }
 
+        private void LoadPanelSettings()
+        {
+            var localSettings = Windows.Storage.ApplicationData.Current.LocalSettings;
+            _isInfoPanelOpen = (bool)(localSettings.Values["IsInfoPanelOpen"] ?? false);
+
+            if (_isInfoPanelOpen)
+            {
+                InfoPanelColumn.Width = new GridLength(PanelWidth);
+                InfoPanel.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                InfoPanelColumn.Width = new GridLength(0);
+                InfoPanel.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        private void InfoButton_Click(object sender, RoutedEventArgs e)
+        {
+            _isInfoPanelOpen = !_isInfoPanelOpen;
+            var localSettings = Windows.Storage.ApplicationData.Current.LocalSettings;
+            localSettings.Values["IsInfoPanelOpen"] = _isInfoPanelOpen;
+
+            AnimatePanel(_isInfoPanelOpen);
+        }
+
+        private void AnimatePanel(bool open)
+        {
+            if (open) InfoPanel.Visibility = Visibility.Visible;
+
+            // ÇÖZÜM: GridLength animasyonu yerine doğrudan sütun genişliğini kodla değiştiriyoruz.
+            // WinUI 3'te Storyboard ile GridLength animasyonu sorunlu olduğu için
+            // Composition API veya manuel zamanlayıcı en güvenlisidir.
+            // Ama en basiti, animasyonsuz geçiş yapıp sonra animasyonu eklemektir.
+
+            DoubleAnimation animation = new DoubleAnimation
+            {
+                From = open ? 0 : PanelWidth,
+                To = open ? PanelWidth : 0,
+                Duration = TimeSpan.FromMilliseconds(200),
+                EasingFunction = new CircleEase { EasingMode = EasingMode.EaseOut }
+            };
+
+            Storyboard sb = new Storyboard();
+            // Hedef olarak doğrudan sütunu değil, genişlik değerini manuel güncelleyen bir yapı kuruyoruz
+            animation.EnableDependentAnimation = true;
+
+            // Animasyon süresince sütun genişliğini elle güncelleyen küçük bir hile:
+            var startTime = DateTime.Now;
+            var duration = animation.Duration.TimeSpan.TotalMilliseconds;
+
+            DispatcherQueue.TryEnqueue(async () => {
+                double elapsed = 0;
+                while (elapsed < duration)
+                {
+                    elapsed = (DateTime.Now - startTime).TotalMilliseconds;
+                    double progress = Math.Min(elapsed / duration, 1);
+                    // Basit bir easing uygulaması
+                    double easedProgress = 1 - Math.Cos((progress * Math.PI) / 2);
+
+                    double currentWidth = open ? (easedProgress * PanelWidth) : (PanelWidth - (easedProgress * PanelWidth));
+                    InfoPanelColumn.Width = new GridLength(Math.Max(0, currentWidth));
+
+                    await System.Threading.Tasks.Task.Delay(10);
+                }
+
+                if (!open) InfoPanel.Visibility = Visibility.Collapsed;
+                InfoPanelColumn.Width = new GridLength(open ? PanelWidth : 0);
+            });
+        }
+
+        // --- DİĞER METODLAR (IMAGE/PICKER) ---
+        // (Buradaki SelectFile_Click, ResetImageTransforms, Pointer metodları aynı kalacak)
         private async void SelectFile_Click(object sender, RoutedEventArgs e)
         {
             var picker = new FileOpenPicker();
             var hwnd = WindowNative.GetWindowHandle(this);
             InitializeWithWindow.Initialize(picker, hwnd);
-
             picker.ViewMode = PickerViewMode.Thumbnail;
             picker.SuggestedStartLocation = PickerLocationId.PicturesLibrary;
-
             picker.FileTypeFilter.Add(".jpg");
             picker.FileTypeFilter.Add(".png");
             picker.FileTypeFilter.Add(".gif");
@@ -42,7 +140,6 @@ namespace PhotoViewer.Views
             var file = await picker.PickSingleFileAsync();
             if (file != null)
             {
-                // Yeni resim açıldığında zoom ve kaydırmayı sıfırlamak iyi bir fikirdir
                 ResetImageTransforms();
                 await ViewModel.LoadPhotoAsync(file.Path);
             }
@@ -50,43 +147,25 @@ namespace PhotoViewer.Views
 
         private void ResetImageTransforms()
         {
-            ImageTransform.ScaleX = 1;
-            ImageTransform.ScaleY = 1;
-            ImageTransform.TranslateX = 0;
-            ImageTransform.TranslateY = 0;
+            ImageTransform.ScaleX = 1; ImageTransform.ScaleY = 1;
+            ImageTransform.TranslateX = 0; ImageTransform.TranslateY = 0;
         }
 
-        // --- ZOOM MANTIĞI ---
         private void MainImage_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
         {
             var pointerPoint = e.GetCurrentPoint(MainImage);
-            var position = pointerPoint.Position;
-
-            ImageTransform.CenterX = position.X;
-            ImageTransform.CenterY = position.Y;
-
             var delta = pointerPoint.Properties.MouseWheelDelta;
             double zoomFactor = delta > 0 ? 1.1 : 0.9;
-
-            double newScaleX = ImageTransform.ScaleX * zoomFactor;
-            double newScaleY = ImageTransform.ScaleY * zoomFactor;
-
-            if (newScaleX >= 0.1 && newScaleX <= 10)
-            {
-                ImageTransform.ScaleX = newScaleX;
-                ImageTransform.ScaleY = newScaleY;
-            }
-
+            ImageTransform.CenterX = pointerPoint.Position.X;
+            ImageTransform.CenterY = pointerPoint.Position.Y;
+            double newScale = ImageTransform.ScaleX * zoomFactor;
+            if (newScale >= 0.1 && newScale <= 10) { ImageTransform.ScaleX = newScale; ImageTransform.ScaleY = newScale; }
             e.Handled = true;
         }
 
-        // --- KAYDIRMA (PAN) MANTIĞI REVİZE ---
         private void MainImage_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
-            var properties = e.GetCurrentPoint(MainImage).Properties;
-
-            // Sadece SOL TIK basılıysa kaydırmayı başlat (Orta tuş kaldırıldı)
-            if (properties.IsLeftButtonPressed)
+            if (e.GetCurrentPoint(MainImage).Properties.IsLeftButtonPressed)
             {
                 _isPanning = true;
                 _lastPointerPosition = e.GetCurrentPoint(MainImage).Position;
@@ -100,55 +179,22 @@ namespace PhotoViewer.Views
             if (_isPanning)
             {
                 var currentPosition = e.GetCurrentPoint(MainImage).Position;
-
-                // Fare hareket miktarını hesapla
-                double deltaX = currentPosition.X - _lastPointerPosition.X;
-                double deltaY = currentPosition.Y - _lastPointerPosition.Y;
-
-                // Resmi kaydır (Translate)
-                ImageTransform.TranslateX += deltaX;
-                ImageTransform.TranslateY += deltaY;
-
-                // Not: Pozisyonu güncellemiyoruz çünkü TranslateX/Y değiştikçe 
-                // koordinat sistemi de kayıyor. _lastPointerPosition'ı sabit tutmak
-                // bu özel transform yapısında daha pürüzsüz sonuç verebilir.
-                // Eğer zıplama olursa: _lastPointerPosition = currentPosition;
+                ImageTransform.TranslateX += currentPosition.X - _lastPointerPosition.X;
+                ImageTransform.TranslateY += currentPosition.Y - _lastPointerPosition.Y;
+                // NOT: Bu transform yapısında pürüzsüzlük için pozisyonu güncellemiyoruz
             }
         }
 
         private void MainImage_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
-            if (_isPanning)
-            {
-                _isPanning = false;
-                MainImage.ReleasePointerCapture(e.Pointer);
-                e.Handled = true;
-            }
+            _isPanning = false;
+            MainImage.ReleasePointerCapture(e.Pointer);
         }
 
-        // --- ÇİFT TIKLAMA ZOOM MANTIĞI ---
         private void MainImage_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
         {
-            // Eğer şu an zoom yapılmışsa (Scale > 1), sıfırla
-            if (ImageTransform.ScaleX > 1.0)
-            {
-                ResetImageTransforms();
-            }
-            else
-            {
-                // Değilse, imlecin olduğu noktaya %250 (2.5 kat) zoom yap
-                var position = e.GetPosition(MainImage);
-
-                ImageTransform.CenterX = position.X;
-                ImageTransform.CenterY = position.Y;
-
-                ImageTransform.ScaleX = 2.5;
-                ImageTransform.ScaleY = 2.5;
-
-                // Opsiyonel: Zoom yapınca resmi merkeze hafifçe kaydırabiliriz 
-                // ama şu anki haliyle imlece odaklanması yeterli olacaktır.
-            }
-            e.Handled = true;
+            if (ImageTransform.ScaleX > 1.0) ResetImageTransforms();
+            else { ImageTransform.ScaleX = 2.5; ImageTransform.ScaleY = 2.5; }
         }
     }
 }

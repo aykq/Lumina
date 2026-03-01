@@ -42,20 +42,15 @@ namespace PhotoViewer
 
         private void App_Activated(object sender, AppActivationArguments e)
         {
-            // UI güncellemelerini ana iş parçacığına gönder
             _window?.DispatcherQueue.TryEnqueue(() =>
             {
                 CheckForFileActivation(e);
-
-                if (_window != null)
+                if (_window is MainWindow mainWindow)
                 {
-                    var hwnd = WindowNative.GetWindowHandle(_window);
-
-                    // Önce pencereyi eski boyutuna getir (minimize ise), sonra en öne çek
-                    ShowWindow(hwnd, SW_RESTORE);
-                    SetForegroundWindow(hwnd);
-
-                    _window.Activate();
+                    var hwnd = WindowNative.GetWindowHandle(mainWindow);
+                    MainWindow.ShowWindow(hwnd, MainWindow.SW_RESTORE);
+                    MainWindow.SetForegroundWindow(hwnd);
+                    mainWindow.Activate();
                 }
             });
         }

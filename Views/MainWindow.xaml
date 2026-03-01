@@ -11,10 +11,21 @@
     <Grid>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
-            <ColumnDefinition Width="350" />
+            <ColumnDefinition x:Name="InfoPanelColumn" Width="0" />
         </Grid.ColumnDefinitions>
 
         <Grid Grid.Column="0" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+
+            <Button x:Name="InfoButton" 
+                    Click="InfoButton_Click"
+                    VerticalAlignment="Top" 
+                    HorizontalAlignment="Right" 
+                    Margin="20"
+                    Canvas.ZIndex="10"
+                    ToolTipService.ToolTip="Bilgileri Göster/Gizle">
+                <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE946;"/>
+            </Button>
+
             <Image x:Name="MainImage" 
                 Source="{x:Bind ViewModel.DisplayImage, Mode=OneWay}" 
                 Stretch="Uniform" 
@@ -43,11 +54,13 @@
             </StackPanel>
         </Grid>
 
-        <Border Grid.Column="1" 
+        <Border x:Name="InfoPanel"
+                Grid.Column="1" 
+                Visibility="Collapsed"
                 Background="{ThemeResource SystemControlAcrylicElementBrush}" 
                 BorderBrush="{ThemeResource SystemControlForegroundBaseMediumLowBrush}" 
                 BorderThickness="1,0,0,0">
-            <Grid Padding="20">
+            <Grid Padding="20" Width="350">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />

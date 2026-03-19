@@ -1,7 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media.Animation;
 using PhotoViewer.ViewModels;
 using System;
 using System.Runtime.InteropServices;
@@ -26,19 +25,6 @@ namespace PhotoViewer.Views
         public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
         public const int SW_RESTORE = 9;
-
-        // --- ANIMASYON KÖPRÜSÜ (Grid Üzerinde Tanımlı) ---
-        // Window DependencyObject olmadığı için bu özelliği RootGrid üzerinden yöneteceğiz.
-        public static readonly DependencyProperty PanelWidthValueProperty =
-            DependencyProperty.Register("PanelWidthValue", typeof(double), typeof(Grid),
-            new PropertyMetadata(0.0, (s, e) => {
-                // Bu event tetiklendiğinde MainWindow'a ulaşıp sütun genişliğini güncelle
-                if (s is FrameworkElement element && element.XamlRoot?.Content is Grid rootGrid)
-                {
-                    // Not: XamlRoot üzerinden erişim yerine basitçe doğrudan sütuna ulaşıyoruz
-                    // Çünkü bu kod MainWindow.xaml.cs içinde çalışıyor.
-                }
-            }));
 
         public MainWindow()
         {
@@ -76,26 +62,8 @@ namespace PhotoViewer.Views
         {
             if (open) InfoPanel.Visibility = Visibility.Visible;
 
-            // ÇÖZÜM: GridLength animasyonu yerine doğrudan sütun genişliğini kodla değiştiriyoruz.
-            // WinUI 3'te Storyboard ile GridLength animasyonu sorunlu olduğu için
-            // Composition API veya manuel zamanlayıcı en güvenlisidir.
-            // Ama en basiti, animasyonsuz geçiş yapıp sonra animasyonu eklemektir.
-
-            DoubleAnimation animation = new DoubleAnimation
-            {
-                From = open ? 0 : PanelWidth,
-                To = open ? PanelWidth : 0,
-                Duration = TimeSpan.FromMilliseconds(200),
-                EasingFunction = new CircleEase { EasingMode = EasingMode.EaseOut }
-            };
-
-            Storyboard sb = new Storyboard();
-            // Hedef olarak doğrudan sütunu değil, genişlik değerini manuel güncelleyen bir yapı kuruyoruz
-            animation.EnableDependentAnimation = true;
-
-            // Animasyon süresince sütun genişliğini elle güncelleyen küçük bir hile:
             var startTime = DateTime.Now;
-            var duration = animation.Duration.TimeSpan.TotalMilliseconds;
+            var duration = 200.0;
 
             DispatcherQueue.TryEnqueue(async () => {
                 double elapsed = 0;
@@ -103,7 +71,6 @@ namespace PhotoViewer.Views
                 {
                     elapsed = (DateTime.Now - startTime).TotalMilliseconds;
                     double progress = Math.Min(elapsed / duration, 1);
-                    // Basit bir easing uygulaması
                     double easedProgress = 1 - Math.Cos((progress * Math.PI) / 2);
 
                     double currentWidth = open ? (easedProgress * PanelWidth) : (PanelWidth - (easedProgress * PanelWidth));
@@ -117,38 +84,26 @@ namespace PhotoViewer.Views
             });
         }
 
-        // --- DİĞER METODLAR (IMAGE/PICKER) ---
-        // (Buradaki SelectFile_Click, ResetImageTransforms, Pointer metodları aynı kalacak)
-        // File picker removed (UI no longer exposes select button).
-
         private void ResetImageTransforms()
         {
-            // Defer reset to ensure layout is stable, then clear transforms so image returns to layout-centered position
             DispatcherQueue.TryEnqueue(() =>
             {
                 try
                 {
-                    // Ensure transform origin is centered
                     MainImage.RenderTransformOrigin = new Windows.Foundation.Point(0.5, 0.5);
 
                     ImageTransform.ScaleX = 1;
                     ImageTransform.ScaleY = 1;
-
-                    // Clear translations
                     ImageTransform.TranslateX = 0;
                     ImageTransform.TranslateY = 0;
-
-                    // Clear any manual centers
                     ImageTransform.CenterX = 0;
                     ImageTransform.CenterY = 0;
 
-                    // Force a layout pass
                     MainImage.UpdateLayout();
                 }
                 catch { }
             });
 
-            // hide zoom indicator when reset
             HideZoomIndicator();
         }
 

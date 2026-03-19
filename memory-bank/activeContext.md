@@ -1,0 +1,36 @@
+# Active Context
+
+## Current Work Focus
+
+Proje temizliği ve stabilizasyon çalışmaları tamamlandı. Memory Bank Phase 0-1-2-3 formatında güncellendi.
+
+## Recent Changes
+
+- **2026-03-18**: Temizlik ve stabilizasyon
+  - NullToVisibilityConverter.cs silindi (boş dosya)
+  - MainWindow.xaml.cs temizlendi (kullanılmayan kodlar kaldırıldı)
+  - MainViewModel.cs temizlendi (kullanılmayan property'ler kaldırıldı)
+  - MetadataService.cs temizlendi (aşırı metadata tag collection döngüsü kaldırıldı)
+  - AnimatePanel metodu sadeleştirildi (kullanılmayan DoubleAnimation/Storyboard kodları kaldırıldı)
+  - progress.md Phase 0-1-2-3 formatında güncellendi
+  - systemPatterns.md güncellendi (mevcut yapıya uygun)
+
+## Next Steps
+
+1. Phase 1 için toolbar ekleme (döndürme, kırpma, silme, kaydetme)
+2. Phase 1 için navigasyon sistemi ekleme
+3. Memory Bank'i her değişiklikten sonra güncelle
+
+## Active Decisions and Considerations
+
+- Single-instance davranışı App.xaml.cs ile yönetiliyor
+- Magick.NET görüntü işleme için hazır (Phase 1'de kullanılacak)
+- MetadataService sadece gerekli alanları çıkarıyor (Camera, Resolution, FileSize, Coordinates, GpsAltitude, Format)
+- Panel animasyonları manuel easing ile yapılıyor
+
+## Learnings and Project Insights
+
+- WinUI 3'te GridLength animasyonu XAML Storyboard ile çalışmıyor, manuel implementasyon gerekiyor
+- CommunityToolkit.Mvvm [ObservableProperty] attribute'u kod üretimi yapıyor
+- WriteableBitmap Magick.NET görüntülerini UI'da göstermek için kullanılıyor
+- MetadataExtractor JPEG, PNG, TIFF, HEIC/HEIF formatlarını destekliyor

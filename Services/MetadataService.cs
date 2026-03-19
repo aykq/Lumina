@@ -56,29 +56,6 @@ namespace PhotoViewer.Services
 
                 // Fotoğraf formatı
                 metadataList.Add(new ExifData { Label = "Format", Value = fileInfo.Extension.Trim('.').ToUpperInvariant() });
-
-                // (Optional) Add remaining tags for inspection
-                foreach (var directory in directories)
-                {
-                    foreach (var tag in directory.Tags)
-                    {
-                        // Skip duplicates for keys we already added
-                        if (tag.Name.Equals("Model", System.StringComparison.OrdinalIgnoreCase) ||
-                            tag.Name.Equals("Make", System.StringComparison.OrdinalIgnoreCase) ||
-                            tag.Name.Equals("Image Width", System.StringComparison.OrdinalIgnoreCase) ||
-                            tag.Name.Equals("Image Height", System.StringComparison.OrdinalIgnoreCase) ||
-                            tag.Name.Equals("GPS Latitude", System.StringComparison.OrdinalIgnoreCase) ||
-                            tag.Name.Equals("GPS Longitude", System.StringComparison.OrdinalIgnoreCase) ||
-                            tag.Name.Equals("GPS Altitude", System.StringComparison.OrdinalIgnoreCase))
-                            continue;
-
-                        metadataList.Add(new ExifData
-                        {
-                            Label = $"{directory.Name} - {tag.Name}",
-                            Value = tag.Description
-                        });
-                    }
-                }
             }
             catch
             {

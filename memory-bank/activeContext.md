@@ -2,7 +2,7 @@
 
 ## Current Work Focus
 
-**Saf görüntüleyici** odaklı: düzenleme kaldırıldı; **WIC** ile hızlı decode; aynı klasörde **hızlı gezinti** (buton + ←/→).
+**Saf görüntüleyici**: WIC + **Magick fallback**; döngüsel klasör gezintisi; **kenar gezinti** çubukları; başlık + panelde dosya adı.
 
 ## Recent Changes
 

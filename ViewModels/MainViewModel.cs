@@ -41,11 +41,18 @@ namespace PhotoViewer.ViewModels
         [ObservableProperty]
         public partial string? GpsAltitude { get; set; }
 
-        /// <summary>Yükleme / codec mesajı (toolbar altında).</summary>
+        /// <summary>Pencere başlığı: dosya adı + uygulama adı.</summary>
+        [ObservableProperty]
+        public partial string WindowTitle { get; set; } = "Photo Viewer";
+
+        /// <summary>Sadece dosya adı ve uzantısı (bilgi paneli).</summary>
+        [ObservableProperty]
+        public partial string FileDisplayName { get; set; } = string.Empty;
+
+        /// <summary>WIC yok / ImageMagick vb.</summary>
         [ObservableProperty]
         public partial string? StatusMessage { get; set; }
 
-        /// <summary>Örn. "3 / 42"</summary>
         [ObservableProperty]
         public partial string NavigationInfo { get; set; } = string.Empty;
 
@@ -63,6 +70,10 @@ namespace PhotoViewer.ViewModels
             DisplayImage = null;
 
             var fullPath = Path.GetFullPath(filePath);
+            var fileName = Path.GetFileName(fullPath);
+            FileDisplayName = fileName;
+            WindowTitle = $"{fileName} — Photo Viewer";
+
             _folderFiles = PhotoFolderService.GetSortedImagesInSameFolder(fullPath);
             _currentIndex = PhotoFolderService.IndexOf(_folderFiles, fullPath);
             if (_currentIndex < 0)
@@ -77,16 +88,21 @@ namespace PhotoViewer.ViewModels
 
             try
             {
-                var bitmap = await _imageLoader.LoadImageAsync(fullPath, ct);
+                var outcome = await _imageLoader.LoadImageAsync(fullPath, ct);
                 ct.ThrowIfCancellationRequested();
 
-                if (bitmap is null)
+                if (outcome.Bitmap is null)
                 {
-                    StatusMessage = "Görüntü açılamadı (Windows görüntü codec’i veya dosya formatı desteklenmiyor olabilir).";
+                    StatusMessage = "Görüntü açılamadı (Windows codec ve ImageMagick bu dosyayı okuyamadı).";
                     return;
                 }
 
-                DisplayImage = bitmap;
+                DisplayImage = outcome.Bitmap;
+
+                if (outcome.UsedMagickFallback)
+                    StatusMessage = "Windows bu dosyayı doğrudan açamadı; ImageMagick ile gösteriliyor.";
+                else
+                    StatusMessage = null;
 
                 var metadata = await _metadataService.GetExifMetadataAsync(fullPath);
 
@@ -111,17 +127,17 @@ namespace PhotoViewer.ViewModels
         [RelayCommand]
         public async Task NextPhotoAsync()
         {
-            if (_folderFiles.Count < 2 || _currentIndex < 0 || _currentIndex >= _folderFiles.Count - 1)
-                return;
-            await LoadPhotoAsync(_folderFiles[_currentIndex + 1]);
+            if (_folderFiles.Count < 2 || _currentIndex < 0) return;
+            int next = _currentIndex >= _folderFiles.Count - 1 ? 0 : _currentIndex + 1;
+            await LoadPhotoAsync(_folderFiles[next]);
         }
 
         [RelayCommand]
         public async Task PreviousPhotoAsync()
         {
-            if (_folderFiles.Count < 2 || _currentIndex <= 0)
-                return;
-            await LoadPhotoAsync(_folderFiles[_currentIndex - 1]);
+            if (_folderFiles.Count < 2 || _currentIndex < 0) return;
+            int prev = _currentIndex <= 0 ? _folderFiles.Count - 1 : _currentIndex - 1;
+            await LoadPhotoAsync(_folderFiles[prev]);
         }
     }
 }

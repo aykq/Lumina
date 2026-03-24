@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
 using System.Threading.Tasks;
+using ImageMagick;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Graphics.Imaging;
 using Windows.Storage;
@@ -10,13 +11,30 @@ using Windows.Storage;
 namespace PhotoViewer.Services
 {
     /// <summary>
-    /// Windows Imaging Component (WIC) ile hızlı decode; büyük görsellerde uzun kenar sınırı.
+    /// Önce WIC (hızlı); olmazsa ImageMagick (geniş format desteği).
     /// </summary>
     public class ImageLoaderService
     {
         private const int MaxDisplayLongEdge = 4096;
 
-        public async Task<WriteableBitmap?> LoadImageAsync(string filePath, CancellationToken cancellationToken = default)
+        public sealed class LoadOutcome
+        {
+            public WriteableBitmap? Bitmap { get; init; }
+            /// <summary>WIC başarısız, ImageMagick ile açıldı.</summary>
+            public bool UsedMagickFallback { get; init; }
+        }
+
+        public async Task<LoadOutcome> LoadImageAsync(string filePath, CancellationToken cancellationToken = default)
+        {
+            var wic = await TryLoadWithWicAsync(filePath, cancellationToken).ConfigureAwait(true);
+            if (wic is not null)
+                return new LoadOutcome { Bitmap = wic, UsedMagickFallback = false };
+
+            cancellationToken.ThrowIfCancellationRequested();
+            return await TryLoadWithMagickAsync(filePath, cancellationToken).ConfigureAwait(true);
+        }
+
+        private static async Task<WriteableBitmap?> TryLoadWithWicAsync(string filePath, CancellationToken cancellationToken)
         {
             StorageFile file;
             try
@@ -38,7 +56,6 @@ namespace PhotoViewer.Services
             }
             catch
             {
-                // WIC codec yok (ör. bazı JXL ortamları) veya bozuk dosya
                 return null;
             }
 
@@ -97,6 +114,105 @@ namespace PhotoViewer.Services
             }
 
             return bitmap;
+        }
+
+        /// <summary>Magick decode arka planda; WriteableBitmap UI iş parçacığında oluşturulur.</summary>
+        private static async Task<LoadOutcome> TryLoadWithMagickAsync(string filePath, CancellationToken cancellationToken)
+        {
+            byte[]? pixels;
+            int outW;
+            int outH;
+
+            try
+            {
+                (pixels, outW, outH) = await Task.Run(
+                    () => DecodeWithMagickPixels(filePath, cancellationToken),
+                    cancellationToken).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (pixels is null || outW <= 0 || outH <= 0)
+                return new LoadOutcome { Bitmap = null, UsedMagickFallback = false };
+
+            if (pixels.Length < outW * outH * 4)
+                return new LoadOutcome { Bitmap = null, UsedMagickFallback = false };
+
+            var bitmap = new WriteableBitmap(outW, outH);
+            using (var dest = bitmap.PixelBuffer.AsStream())
+            {
+                await dest.WriteAsync(pixels, 0, pixels.Length).ConfigureAwait(true);
+            }
+
+            return new LoadOutcome { Bitmap = bitmap, UsedMagickFallback = true };
+        }
+
+        private static (byte[]? Pixels, int Width, int Height) DecodeWithMagickPixels(string filePath, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!File.Exists(filePath))
+                return (null, 0, 0);
+
+            try
+            {
+                var readSettings = CreateMagickReadSettings(filePath);
+                using var image = new MagickImage(filePath, readSettings);
+                image.AutoOrient();
+
+                if (Math.Max(image.Width, image.Height) > MaxDisplayLongEdge)
+                {
+                    var geo = new MagickGeometry(MaxDisplayLongEdge, MaxDisplayLongEdge)
+                    {
+                        IgnoreAspectRatio = false,
+                        Greater = true
+                    };
+                    image.Resize(geo);
+                }
+
+                image.ResetPage();
+                image.Format = MagickFormat.Bgra;
+                var pixels = image.ToByteArray(MagickFormat.Bgra);
+                int outW = (int)image.Width;
+                int outH = (int)image.Height;
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                return (pixels, outW, outH);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                return (null, 0, 0);
+            }
+        }
+
+        private static MagickReadSettings CreateMagickReadSettings(string filePath)
+        {
+            var settings = new MagickReadSettings();
+            var ext = Path.GetExtension(filePath).ToLowerInvariant();
+            switch (ext)
+            {
+                case ".heic":
+                case ".heif":
+                    settings.Format = MagickFormat.Heic;
+                    break;
+                case ".jxl":
+                    settings.Format = MagickFormat.Jxl;
+                    break;
+                case ".webp":
+                    settings.Format = MagickFormat.WebP;
+                    break;
+            }
+
+            return settings;
         }
     }
 }

@@ -18,7 +18,7 @@
 - Microsoft.WindowsAppSDK 1.8.260209005
 - CommunityToolkit.Mvvm 8.4.0
 - MetadataExtractor 2.9.0
-- Görüntü decode: **Windows.Graphics.Imaging (WIC)** — Magick.NET yok
+- Görüntü decode: **WIC** (birincil) + **Magick.NET** (fallback)
 
 ---
 
@@ -28,8 +28,10 @@
 - [x] **Düzenleme kaldırıldı** (döndürme, kırpma, diske yazma, `.bak` yok)
 - [x] **WIC** ile decode (sistem codec’leri; daha hızlı açılış)
 - [x] Büyük görsellerde uzun kenar **4096** ile UI ölçekleme
-- [x] **Dizin gezintisi**: aynı klasördeki görüntüler, önceki/sonraki butonlar, **← / →** tuşları
+- [x] **Dizin gezintisi**: aynı klasördeki görüntüler; **son ↔ ilk** döngüsel geçiş; sol/sağ **tam yükseklik** kenar butonları; **← / →**
 - [x] Yükleme iptali (hızlı ardışık geçişte önceki decode iptal)
+- [x] WIC başarısızsa **ImageMagick fallback** + kullanıcıya kısa bilgi
+- [x] Pencere başlığı ve bilgi panelinde **dosya adı**
 
 ### Yapılacak Görevler
 - [ ] Fotoğraf silme

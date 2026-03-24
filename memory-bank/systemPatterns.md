@@ -24,7 +24,7 @@ ViewModels
 ## Key Technical Decisions
 
 1. **Single-Instance Pattern**: App.xaml.cs içinde AppLifecycle API kullanılarak tek kopya çalışma garantisi
-2. **WriteableBitmap Display**: `BitmapDecoder` + `GetPixelDataAsync` (BGRA8) → `WriteableBitmap` — **Magick yok**
+2. **WriteableBitmap Display**: Önce `BitmapDecoder` (WIC); gerekirse ImageMagick → piksel buffer → UI’da `WriteableBitmap`
 3. **Panel Animations**: Manuel easing ile GridLength animasyonu (WinUI3'te XAML animasyonu sorunlu)
 4. **Metadata**: MetadataExtractor (EXIF) + `BitmapDecoder` başlığı (çözünürlük)
 5. **Gezinti**: Açılan dosyanın klasörü taranır; sıralı liste; önceki/sonraki; `CancellationToken` ile hızlı geçişte iptal

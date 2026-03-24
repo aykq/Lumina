@@ -7,13 +7,12 @@
 | .NET | 8.0 | Runtime |
 | Windows App SDK | 1.8.260209005 | WinUI 3 UI Framework |
 | CommunityToolkit.Mvvm | 8.4.0 | MVVM pattern implementasyonu |
-| **Windows.Graphics.Imaging (WIC)** | OS codec | Görüntü **decode** (BitmapDecoder → WriteableBitmap); sistem codec’leri (JPEG, PNG, HEIC*, WebP, vb.) |
+| **Windows.Graphics.Imaging (WIC)** | OS codec | Birincil decode (hızlı) |
+| **Magick.NET-Q8-AnyCPU** | 14.11.0 | **Fallback** decode (WIC başarısız olunca; JXL, bazı RAW vb.) |
 | MetadataExtractor | 2.9.0 | EXIF metadata okuma |
 | WinUI 3 | - | Kullanıcı arayüzü |
 
-\* HEIC: Windows’ta HEIF Image Extensions yüklü olmalı.
-
-**Not:** Magick.NET kaldırıldı; düzenleme yok. Ağır encode/decode yükü ortadan kalktı.
+**Akış:** Önce WIC → başarısızsa ImageMagick (piksel decode arka planda; `WriteableBitmap` UI iş parçacığında).
 
 ## Development Setup
 
@@ -38,14 +37,15 @@ dotnet run
 ## Technical Constraints
 
 - WinUI 3'te GridLength animasyonu XAML Storyboard ile çalışmıyor, manuel easing kullanılıyor
-- Görüntü gösterimi **WIC** ile; bazı formatlar (ör. JXL) için sistemde codec yoksa açılmayabilir
-- MetadataExtractor JPEG, PNG, TIFF, HEIC/HEIF vb. için EXIF okur; çözünürlük satırı için `BitmapDecoder` (hızlı başlık okuma)
+- Fallback Magick decode CPU ağırdır; yalnızca WIC yetmediğinde devreye girer
+- MetadataExtractor + çözünürlük için `BitmapDecoder` (WIC); codec yoksa çözünürlük satırı boş kalabilir
 - Single-instance için AppLifecycle API kullanılıyor
 
 ## Dependencies
 
 ```
 CommunityToolkit.Mvvm
+Magick.NET-Q8-AnyCPU
 MetadataExtractor
 Microsoft.WindowsAppSDK
 ```

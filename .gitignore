@@ -362,3 +362,7 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 build_output.txt
+
+# AI assistant working memory and configuration
+memory-bank/
+AGENTS.md

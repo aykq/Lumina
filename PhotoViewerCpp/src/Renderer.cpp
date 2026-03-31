@@ -11,6 +11,11 @@ Renderer::~Renderer()
 {
     DiscardDeviceResources();
 
+    if (m_wicFactory)
+    {
+        m_wicFactory->Release();
+        m_wicFactory = nullptr;
+    }
     if (m_factory)
     {
         m_factory->Release();
@@ -38,6 +43,13 @@ HRESULT Renderer::CreateDeviceResources()
 
 void Renderer::DiscardDeviceResources()
 {
+    // ID2D1Bitmap render target'a bağlı bir GPU kaynağıdır;
+    // render target yok edilince bitmap da geçersiz olur.
+    if (m_bitmap)
+    {
+        m_bitmap->Release();
+        m_bitmap = nullptr;
+    }
     if (m_renderTarget)
     {
         m_renderTarget->Release();
@@ -45,18 +57,116 @@ void Renderer::DiscardDeviceResources()
     }
 }
 
+bool Renderer::LoadImage(const std::wstring& path)
+{
+    // Önceki bitmap'i temizle
+    if (m_bitmap)
+    {
+        m_bitmap->Release();
+        m_bitmap = nullptr;
+    }
+
+    // WIC fabrikasını ilk çağrıda oluştur (CoInitialize WinMain'de yapılmış olmalı)
+    if (!m_wicFactory)
+    {
+        HRESULT hr = CoCreateInstance(
+            CLSID_WICImagingFactory,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&m_wicFactory)
+        );
+        if (FAILED(hr)) return false;
+    }
+
+    // Dosyadan decoder oluştur — WIC desteklenen tüm formatları otomatik tanır
+    IWICBitmapDecoder* decoder = nullptr;
+    HRESULT hr = m_wicFactory->CreateDecoderFromFilename(
+        path.c_str(),
+        nullptr,
+        GENERIC_READ,
+        WICDecodeMetadataCacheOnLoad,  // Metadata decode sırasında okunur (Phase 5'te kullanılacak)
+        &decoder
+    );
+    if (FAILED(hr)) return false;
+
+    // İlk frame'i al (JPEG gibi tek-frame formatlar için frame 0)
+    IWICBitmapFrameDecode* frame = nullptr;
+    hr = decoder->GetFrame(0, &frame);
+    decoder->Release();
+    if (FAILED(hr)) return false;
+
+    // Format converter: piksel formatını D2D'nin beklediği 32bppPBGRA'ya çevir
+    // P = pre-multiplied alpha (Direct2D bu formatı ister)
+    IWICFormatConverter* converter = nullptr;
+    hr = m_wicFactory->CreateFormatConverter(&converter);
+    if (FAILED(hr)) { frame->Release(); return false; }
+
+    hr = converter->Initialize(
+        frame,
+        GUID_WICPixelFormat32bppPBGRA,
+        WICBitmapDitherTypeNone,
+        nullptr,
+        0.0f,
+        WICBitmapPaletteTypeMedianCut
+    );
+    frame->Release();
+    if (FAILED(hr)) { converter->Release(); return false; }
+
+    // Render target hazır olmalı (bitmap ona bağlı bir GPU kaynağı)
+    if (FAILED(CreateDeviceResources())) { converter->Release(); return false; }
+
+    // WIC bitmap → GPU'ya yükle (ID2D1Bitmap)
+    hr = m_renderTarget->CreateBitmapFromWicBitmap(converter, nullptr, &m_bitmap);
+    converter->Release();
+
+    if (SUCCEEDED(hr))
+    {
+        m_imagePath = path;  // D2DERR_RECREATE_TARGET'ta yeniden yüklemek için sakla
+        return true;
+    }
+    return false;
+}
+
 void Renderer::Render()
 {
     if (FAILED(CreateDeviceResources())) return;
+
+    // D2DERR_RECREATE_TARGET sonrası render target yeniden oluşturuldu ama bitmap gitti —
+    // kaydedilen yoldan yeniden yükle
+    if (!m_bitmap && !m_imagePath.empty())
+        LoadImage(m_imagePath);
 
     m_renderTarget->BeginDraw();
 
     // Arka plan: koyu gri (#1E1E1E — VS Code dark teması ile aynı ton)
     m_renderTarget->Clear(D2D1::ColorF(0.118f, 0.118f, 0.118f));
 
-    // --- Sonraki phase'lerde buraya eklenecek ---
-    // Phase 1: görüntü çizimi (DrawBitmap)
-    // Phase 2: zoom/pan transform
+    if (m_bitmap)
+    {
+        D2D1_SIZE_F windowSize = m_renderTarget->GetSize();
+        D2D1_SIZE_F imageSize  = m_bitmap->GetSize();
+
+        // Aspect ratio korumalı "fit" hesabı:
+        // Her iki eksen için ölçek faktörünü bul, küçük olanı seç
+        // (büyük olanı seçsek görüntü pencereden taşardı)
+        float scaleX = windowSize.width  / imageSize.width;
+        float scaleY = windowSize.height / imageSize.height;
+        float scale  = min(scaleX, scaleY);
+
+        float destW = imageSize.width  * scale;
+        float destH = imageSize.height * scale;
+
+        // Görüntüyü pencere ortasına hizala
+        float destX = (windowSize.width  - destW) * 0.5f;
+        float destY = (windowSize.height - destH) * 0.5f;
+
+        m_renderTarget->DrawBitmap(
+            m_bitmap,
+            D2D1::RectF(destX, destY, destX + destW, destY + destH)
+        );
+    }
+
+    // Phase 2: zoom/pan transform buraya eklenecek (Matrix3x2F)
     // Phase 5: EXIF paneli (DirectWrite metin)
 
     HRESULT hr = m_renderTarget->EndDraw();
@@ -64,7 +174,8 @@ void Renderer::Render()
     if (hr == D2DERR_RECREATE_TARGET)
     {
         // GPU cihazı kayboldu (örn. ekran kartı sürücüsü sıfırlandı).
-        // Kaynakları serbest bırak — bir sonraki Render() çağrısında yeniden oluşturulur.
+        // Render target ve bitmap'i serbest bırak.
+        // Bir sonraki Render() çağrısında m_imagePath'ten yeniden oluşturulur.
         DiscardDeviceResources();
     }
 }

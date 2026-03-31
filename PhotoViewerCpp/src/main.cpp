@@ -1,4 +1,6 @@
 #include <windows.h>
+#include <shellapi.h>   // CommandLineToArgvW
+#include <string>
 #include "Renderer.h"
 
 // Global renderer — pencere mesajlarından erişilebilmesi için
@@ -53,16 +55,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 int WINAPI WinMain(
     _In_     HINSTANCE hInstance,
     _In_opt_ HINSTANCE,   // hPrevInstance — artık kullanılmıyor
-    _In_     LPSTR     lpCmdLine,
+    _In_     LPSTR,       // lpCmdLine — ANSI, Unicode için GetCommandLineW kullanıyoruz
     _In_     int       nCmdShow)
 {
-    // Phase 1'de lpCmdLine buradan okunacak (dosya yolu)
-    (void)lpCmdLine;
+    // COM başlat — WIC (IWICImagingFactory) için gerekli
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    // Komut satırı argümanlarını Unicode olarak oku
+    // Explorer'dan çift tıklamada: argv[1] = tam dosya yolu (boşluklu yollar dahil)
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    std::wstring filePath;
+    if (argc >= 2) filePath = argv[1];
+    LocalFree(argv);  // CommandLineToArgvW heap allocate eder, biz serbest bırakıyoruz
 
     // Pencere sınıfını kaydet
     // CS_DBLCLKS: çift tıklama mesajlarını etkinleştirir (Phase 2: zoom reset)
     // CS_HREDRAW | CS_VREDRAW: pencere boyutlandığında yeniden çiz
-    WNDCLASSEX wc   = {};
+    WNDCLASSEX wc    = {};
     wc.cbSize        = sizeof(WNDCLASSEX);
     wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc   = WndProc;
@@ -72,11 +82,21 @@ int WINAPI WinMain(
     wc.lpszClassName = L"PhotoViewerWindow";
     RegisterClassEx(&wc);
 
-    // Pencereyi oluştur
+    // Pencere başlığını belirle: dosya adı varsa "dosya.jpg — PhotoViewer"
+    std::wstring title = L"PhotoViewer";
+    if (!filePath.empty())
+    {
+        // Yol ayırıcıdan sonraki kısım = dosya adı (\ veya / her ikisini destekle)
+        auto pos = filePath.find_last_of(L"\\/");
+        std::wstring fileName = (pos != std::wstring::npos) ? filePath.substr(pos + 1) : filePath;
+        title = fileName + L" \u2014 PhotoViewer";  // \u2014 = em dash (—)
+    }
+
+    // Pencereyi oluştur (WM_CREATE tetiklenir → g_renderer hazır olur)
     HWND hwnd = CreateWindowEx(
         0,                      // Genişletilmiş stil yok
         L"PhotoViewerWindow",   // Pencere sınıfı adı (yukarıda kayıtlı)
-        L"PhotoViewer",         // Başlık çubuğu metni
+        title.c_str(),          // Başlık: "dosya.jpg — PhotoViewer" veya "PhotoViewer"
         WS_OVERLAPPEDWINDOW,    // Standart başlık + min/max/kapat butonları
         CW_USEDEFAULT, CW_USEDEFAULT, // Başlangıç konumu (OS seçer)
         1280, 800,              // Başlangıç boyutu
@@ -86,7 +106,16 @@ int WINAPI WinMain(
         nullptr                 // WM_CREATE'e geçirilecek ek veri yok
     );
 
-    if (!hwnd) return -1;
+    if (!hwnd)
+    {
+        CoUninitialize();
+        return -1;
+    }
+
+    // Dosya yolunu yükle — CreateWindowEx içinde WM_CREATE tetiklendiğinden
+    // g_renderer bu noktada hazır
+    if (!filePath.empty() && g_renderer)
+        g_renderer->LoadImage(filePath);
 
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd); // İlk WM_PAINT'i hemen gönder
@@ -99,5 +128,6 @@ int WINAPI WinMain(
         DispatchMessage(&msg);  // WndProc'a yönlendirir
     }
 
+    CoUninitialize();
     return static_cast<int>(msg.wParam);
 }

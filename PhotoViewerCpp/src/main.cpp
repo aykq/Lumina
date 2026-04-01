@@ -293,26 +293,42 @@ static float g_panAtDragStartX = 0.0f;
 static float g_panAtDragStartY = 0.0f;
 
 // Ok tıklama/sürükleme ayrımı
-static bool  g_mouseInArrowZone = false;
-static float g_mouseDownX       = 0.0f;
-static float g_mouseDownY       = 0.0f;
-static bool  g_clickIsLeft      = false;
+static bool  g_mouseInArrowZone  = false;
+static float g_mouseDownX        = 0.0f;
+static float g_mouseDownY        = 0.0f;
+static bool  g_clickIsLeft       = false;
+static bool  g_clickIsInfoButton = false;
+static bool  g_suppressNextZoom  = false;  // info button çift tıklamasında zoom'u engelle
 
 // --- Yardımcı: arrow zone hit-test ---
 
 enum class ArrowZone { None, Left, Right };
 
-static ArrowZone HitTestArrow(HWND hwnd, float x, float y)
+// Tıklanabilir bölge: yatayda ok zone genişliği, dikeyde tam yükseklik (panel alanı hariç)
+static ArrowZone HitTestArrow(HWND hwnd, float x, float y, bool panelOpen)
+{
+    (void)y;  // Tam yükseklik — y kısıtlaması yok
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    float availW = static_cast<float>(rc.right) - (panelOpen ? PanelLayout::Width : 0.0f);
+    if (x < ArrowLayout::ZoneW)                         return ArrowZone::Left;
+    if (x >= availW - ArrowLayout::ZoneW && x < availW) return ArrowZone::Right;
+    return ArrowZone::None;
+}
+
+// --- Yardımcı: info button hit-test ---
+// Panel açıkken buton PanelLayout::Width kadar sola kaymış olur
+
+static bool HitTestInfoButton(HWND hwnd, float x, float y, bool panelOpen)
 {
     RECT rc;
     GetClientRect(hwnd, &rc);
-    float midY  = rc.bottom * 0.5f;
-    float halfH = ArrowLayout::PillH * 0.5f;
-
-    if (y < midY - halfH || y > midY + halfH) return ArrowZone::None;
-    if (x < ArrowLayout::ZoneW)               return ArrowZone::Left;
-    if (x > rc.right - ArrowLayout::ZoneW)    return ArrowZone::Right;
-    return ArrowZone::None;
+    float xOffset = panelOpen ? PanelLayout::Width : 0.0f;
+    float x0 = rc.right - InfoButton::Margin - InfoButton::Size - xOffset;
+    float y0 = InfoButton::Margin;
+    float x1 = rc.right - InfoButton::Margin - xOffset;
+    float y1 = InfoButton::Margin + InfoButton::Size;
+    return x >= x0 && x <= x1 && y >= y0 && y <= y1;
 }
 
 // --- Yardımcı: ViewState'in UI alanlarını koruyarak navigasyon ---
@@ -408,22 +424,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         float mx = static_cast<float>(GET_X_LPARAM(lParam));
         float my = static_cast<float>(GET_Y_LPARAM(lParam));
 
-        // Ok zone kontrolü: hangi bölgeye basıldığını kaydet
         g_mouseDownX = mx;
         g_mouseDownY = my;
-        ArrowZone zone = (g_viewState.imageTotal > 0)
-                         ? HitTestArrow(hwnd, mx, my)
-                         : ArrowZone::None;
-        g_mouseInArrowZone = (zone != ArrowZone::None);
-        g_clickIsLeft      = (zone == ArrowZone::Left);
-
-        // Pan sürüklemeyi her durumda başlat (ok üzerinde sürükleme de pan yapar)
         SetCapture(hwnd);
-        g_dragging        = true;
-        g_dragStartX      = mx;
-        g_dragStartY      = my;
-        g_panAtDragStartX = g_viewState.panX;
-        g_panAtDragStartY = g_viewState.panY;
+
+        // Info button önce kontrol edilir (sağ ok zone ile üst üste gelebilir)
+        g_clickIsInfoButton = HitTestInfoButton(hwnd, mx, my, g_viewState.showInfoPanel);
+
+        if (!g_clickIsInfoButton)
+        {
+            // Ok zone kontrolü: hangi bölgeye basıldığını kaydet
+            ArrowZone zone = (g_viewState.imageTotal > 0)
+                             ? HitTestArrow(hwnd, mx, my, g_viewState.showInfoPanel)
+                             : ArrowZone::None;
+            g_mouseInArrowZone = (zone != ArrowZone::None);
+            g_clickIsLeft      = (zone == ArrowZone::Left);
+
+            // Pan sürüklemeyi başlat
+            g_dragging        = true;
+            g_dragStartX      = mx;
+            g_dragStartY      = my;
+            g_panAtDragStartX = g_viewState.panX;
+            g_panAtDragStartY = g_viewState.panY;
+        }
         return 0;
     }
 
@@ -444,6 +467,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         bool wasDragging = g_dragging;
         g_dragging = false;
         ReleaseCapture();
+
+        // Info button tıklaması
+        if (g_clickIsInfoButton)
+        {
+            float delta = fabsf(mx - g_mouseDownX) + fabsf(my - g_mouseDownY);
+            if (delta < 5.0f)
+            {
+                g_viewState.showInfoPanel = !g_viewState.showInfoPanel;
+                g_suppressNextZoom = true;  // Çift tıklamada zoom'u engelle
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            g_clickIsInfoButton = false;
+            return 0;
+        }
 
         if (g_mouseInArrowZone && wasDragging && g_navigator && !g_navigator->empty())
         {
@@ -468,6 +505,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_LBUTTONDBLCLK:
     {
+        // Info button tıklamasından gelen çift tıklamada zoom yapma
+        if (g_suppressNextZoom)
+        {
+            g_suppressNextZoom = false;
+            return 0;
+        }
+
         float cx = static_cast<float>(GET_X_LPARAM(lParam));
         float cy = static_cast<float>(GET_Y_LPARAM(lParam));
 

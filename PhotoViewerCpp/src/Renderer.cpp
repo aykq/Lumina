@@ -101,6 +101,9 @@ HRESULT Renderer::CreateDeviceResources()
     m_renderTarget->CreateSolidColorBrush(
         D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.65f), &m_overlayBrush
     );
+    m_renderTarget->CreateSolidColorBrush(
+        D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.22f), &m_activeBrush
+    );
 
     return S_OK;
 }
@@ -108,6 +111,7 @@ HRESULT Renderer::CreateDeviceResources()
 void Renderer::DiscardDeviceResources()
 {
     if (m_bitmap)       { m_bitmap->Release();       m_bitmap = nullptr; }
+    if (m_activeBrush)  { m_activeBrush->Release();  m_activeBrush = nullptr; }
     if (m_whiteBrush)   { m_whiteBrush->Release();   m_whiteBrush = nullptr; }
     if (m_overlayBrush) { m_overlayBrush->Release(); m_overlayBrush = nullptr; }
     if (m_renderTarget) { m_renderTarget->Release(); m_renderTarget = nullptr; }
@@ -192,6 +196,7 @@ void Renderer::DrawNavArrows(const ViewState& vs)
     if (!m_overlayBrush || !m_whiteBrush || !m_textFormat) return;
 
     D2D1_SIZE_F sz = m_renderTarget->GetSize();
+    float availW = sz.width - (vs.showInfoPanel ? PanelLayout::Width : 0.0f);
     float midY  = sz.height * 0.5f;
     float halfH = ArrowLayout::PillH * 0.5f;
 
@@ -206,16 +211,16 @@ void Renderer::DrawNavArrows(const ViewState& vs)
     D2D1_RECT_F leftText = D2D1::RectF(0, midY - halfH, ArrowLayout::ZoneW, midY + halfH);
     m_renderTarget->DrawText(L"\u2039", 1, m_textFormat, leftText, m_whiteBrush);
 
-    // Sağ ok pill — sağ köşeler pencere dışında kalır; yalnızca sol köşeler yuvarlak görünür
+    // Sağ ok pill — kalan alanın sağ kenarına yapışık; yalnızca sol köşeler yuvarlak görünür
     D2D1_ROUNDED_RECT rightRR = {
-        D2D1::RectF(sz.width - ArrowLayout::ZoneW, midY - halfH,
-                    sz.width + ArrowLayout::Radius, midY + halfH),
+        D2D1::RectF(availW - ArrowLayout::ZoneW, midY - halfH,
+                    availW + ArrowLayout::Radius, midY + halfH),
         ArrowLayout::Radius, ArrowLayout::Radius
     };
     m_renderTarget->FillRoundedRectangle(rightRR, m_overlayBrush);
 
     D2D1_RECT_F rightText = D2D1::RectF(
-        sz.width - ArrowLayout::ZoneW, midY - halfH, sz.width, midY + halfH);
+        availW - ArrowLayout::ZoneW, midY - halfH, availW, midY + halfH);
     m_renderTarget->DrawText(L"\u203A", 1, m_textFormat, rightText, m_whiteBrush);
 }
 
@@ -234,9 +239,10 @@ void Renderer::DrawIndexBar(const ViewState& vs)
     constexpr float kH      = 34.0f;
     constexpr float kMargin = 12.0f;
 
+    float availW = sz.width - (vs.showInfoPanel ? PanelLayout::Width : 0.0f);
     D2D1_RECT_F bgRect = D2D1::RectF(
-        (sz.width - kW) * 0.5f,   sz.height - kH - kMargin,
-        (sz.width + kW) * 0.5f,   sz.height - kMargin
+        (availW - kW) * 0.5f,   sz.height - kH - kMargin,
+        (availW + kW) * 0.5f,   sz.height - kMargin
     );
 
     D2D1_ROUNDED_RECT rr = { bgRect, 6.0f, 6.0f };
@@ -253,18 +259,16 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
     if (!m_overlayBrush || !m_whiteBrush) return;
 
     D2D1_SIZE_F sz = m_renderTarget->GetSize();
-    constexpr float kPanelW = 280.0f;
-    constexpr float kPadX   = 16.0f;
 
     // Panel arka planı — sağ kenara yapışık, tam yükseklik
-    D2D1_RECT_F bg = D2D1::RectF(sz.width - kPanelW, 0.0f, sz.width, sz.height);
+    D2D1_RECT_F bg = D2D1::RectF(sz.width - PanelLayout::Width, 0.0f, sz.width, sz.height);
     m_renderTarget->FillRectangle(bg, m_overlayBrush);
 
     if (!info || !m_labelFormat || !m_valueFormat) return;
 
-    float x0 = sz.width - kPanelW + kPadX;
-    float x1 = sz.width - kPadX;
-    float y  = 24.0f;
+    float x0 = sz.width - PanelLayout::Width + PanelLayout::PadX;
+    float x1 = sz.width - PanelLayout::PadX;
+    float y  = PanelLayout::PadX;
 
     constexpr float kLabelH = 17.0f;
     constexpr float kGap    = 4.0f;
@@ -288,15 +292,27 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
         y += kRowH;
     };
 
-    // Dosya adı — büyük başlık (valueFormat, tek satır)
-    if (!info->filename.empty())
+    // Dosya adı — tek satırsa ortala, taşarsa word-wrap ile gerçek yüksekliğe göre genişle
+    if (!info->filename.empty() && m_dwriteFactory)
     {
-        m_renderTarget->DrawText(
-            info->filename.c_str(), static_cast<UINT32>(info->filename.size()),
-            m_valueFormat, D2D1::RectF(x0, y, x1, y + kValueH),
-            m_whiteBrush
+        float textW = x1 - x0;
+        IDWriteTextLayout* layout = nullptr;
+        m_dwriteFactory->CreateTextLayout(
+            info->filename.c_str(),
+            static_cast<UINT32>(info->filename.size()),
+            m_valueFormat,
+            textW, 1000.0f,
+            &layout
         );
-        y += kValueH + 14.0f;
+        if (layout)
+        {
+            layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            DWRITE_TEXT_METRICS metrics{};
+            layout->GetMetrics(&metrics);
+            m_renderTarget->DrawTextLayout(D2D1::Point2F(x0, y), layout, m_whiteBrush);
+            layout->Release();
+            y += metrics.height + 6.0f;
+        }
     }
 
     // İnce ayraç
@@ -310,7 +326,7 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
     {
         wchar_t dimBuf[32];
         swprintf_s(dimBuf, L"%d \u00d7 %d px", info->width, info->height);
-        DrawRow(L"Çözünürlük", dimBuf);
+        DrawRow(L"Resolution", dimBuf);
     }
 
     if (info->fileSizeBytes > 0)
@@ -320,12 +336,12 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
             swprintf_s(szBuf, L"%.1f MB", info->fileSizeBytes / (1024.0 * 1024.0));
         else
             swprintf_s(szBuf, L"%lld KB", info->fileSizeBytes / 1024);
-        DrawRow(L"Dosya Boyutu", szBuf);
+        DrawRow(L"File Size", szBuf);
     }
 
     DrawRow(L"Format", info->format);
 
-    // EXIF bölümü — sadece en az bir alan doluysa
+    // EXIF section — only if at least one field is populated
     bool hasExif = !info->dateTaken.empty()  || !info->cameraMake.empty()  ||
                    !info->cameraModel.empty() || !info->aperture.empty()    ||
                    !info->shutterSpeed.empty()|| !info->iso.empty();
@@ -338,9 +354,9 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
         );
         y += 10.0f;
 
-        DrawRow(L"Tarih", info->dateTaken);
+        DrawRow(L"Date Taken", info->dateTaken);
 
-        // Kamera marka + model tek satırda
+        // Camera make + model on one line
         if (!info->cameraMake.empty() || !info->cameraModel.empty())
         {
             std::wstring cam = info->cameraMake;
@@ -349,13 +365,41 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
                 if (!cam.empty()) cam += L" ";
                 cam += info->cameraModel;
             }
-            DrawRow(L"Kamera", cam);
+            DrawRow(L"Camera", cam);
         }
 
-        DrawRow(L"Diyafram", info->aperture);
-        DrawRow(L"Enstantane", info->shutterSpeed);
+        DrawRow(L"Aperture", info->aperture);
+        DrawRow(L"Shutter Speed", info->shutterSpeed);
         DrawRow(L"ISO", info->iso);
     }
+}
+
+// ─── Info Button ─────────────────────────────────────────────────────────────
+
+void Renderer::DrawInfoButton(const ViewState& vs)
+{
+    if (!m_overlayBrush || !m_activeBrush || !m_whiteBrush || !m_textFormat) return;
+
+    D2D1_SIZE_F sz = m_renderTarget->GetSize();
+    constexpr float kSize   = InfoButton::Size;
+    constexpr float kMargin = InfoButton::Margin;
+
+    // Panel açıkken buton tüm x pozisyonu sola kayar (x0 ve x1 birlikte)
+    float xOffset = vs.showInfoPanel ? PanelLayout::Width : 0.0f;
+    float x0 = sz.width - kMargin - kSize - xOffset;
+    float y0 = kMargin;
+    float x1 = sz.width - kMargin - xOffset;
+    float y1 = kMargin + kSize;
+
+    D2D1_RECT_F rect = D2D1::RectF(x0, y0, x1, y1);
+    D2D1_ROUNDED_RECT rr = { rect, 6.0f, 6.0f };
+
+    // Active (panel open): white-tinted fill; inactive: standard dark overlay
+    auto* fillBrush = vs.showInfoPanel ? m_activeBrush : m_overlayBrush;
+    m_renderTarget->FillRoundedRectangle(rr, fillBrush);
+
+    // "i" glyph centered in the button
+    m_renderTarget->DrawText(L"i", 1, m_textFormat, rect, m_whiteBrush);
 }
 
 // ─── Ana Render ───────────────────────────────────────────────────────────────
@@ -378,12 +422,13 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
         D2D1_SIZE_F wndSize = m_renderTarget->GetSize();
         D2D1_SIZE_F imgSize = m_bitmap->GetSize();
 
-        float fitScale   = min(wndSize.width / imgSize.width, wndSize.height / imgSize.height);
+        float availW = wndSize.width - (vs.showInfoPanel ? PanelLayout::Width : 0.0f);
+        float fitScale   = min(availW / imgSize.width, wndSize.height / imgSize.height);
         float finalScale = fitScale * vs.zoomFactor;
 
         float destW = imgSize.width  * finalScale;
         float destH = imgSize.height * finalScale;
-        float destX = (wndSize.width  - destW) * 0.5f + vs.panX;
+        float destX = (availW - destW) * 0.5f + vs.panX;
         float destY = (wndSize.height - destH) * 0.5f + vs.panY;
 
         m_renderTarget->DrawBitmap(
@@ -396,6 +441,7 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
     DrawNavArrows(vs);
     DrawIndexBar(vs);
     if (vs.showInfoPanel) DrawInfoPanel(vs, info);
+    DrawInfoButton(vs);  // Info panelinin üstünde çizilir
 
     // Zoom indicator: sağ alt köşe
     if (vs.showZoomIndicator && m_textFormat && m_whiteBrush && m_overlayBrush)

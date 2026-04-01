@@ -14,9 +14,21 @@
 
 // Navigation arrow pill boyutları — hem Renderer hem main.cpp tarafından kullanılır
 namespace ArrowLayout {
-    constexpr float ZoneW  = 48.0f;  // tıklanabilir bölge genişliği
-    constexpr float PillH  = 80.0f;  // pill yüksekliği
+    constexpr float ZoneW  = 48.0f;  // tıklanabilir bölge genişliği (tam yükseklik)
+    constexpr float PillH  = 80.0f;  // pill yüksekliği (sadece görsel)
     constexpr float Radius = 8.0f;   // köşe yarıçapı
+}
+
+// Info panel boyutları — hem Renderer hem main.cpp tarafından kullanılır
+namespace PanelLayout {
+    constexpr float Width = 280.0f;  // panel genişliği
+    constexpr float PadX  = 16.0f;  // panel içi yatay dolgu
+}
+
+// Info button boyutları — hem Renderer hem main.cpp tarafından kullanılır
+namespace InfoButton {
+    constexpr float Size   = 32.0f;  // buton genişlik/yükseklik
+    constexpr float Margin = 12.0f;  // pencere kenarından mesafe
 }
 
 // Görüntüye ait metadata (decode thread'de doldurulur, UI thread'de okunur)
@@ -83,6 +95,7 @@ private:
     void DrawNavArrows(const ViewState& vs);
     void DrawIndexBar(const ViewState& vs);
     void DrawInfoPanel(const ViewState& vs, const ImageInfo* info);
+    void DrawInfoButton(const ViewState& vs);
 
     HWND                   m_hwnd         = nullptr;
     ID2D1Factory*          m_factory      = nullptr;   // Direct2D fabrikası (cihazdan bağımsız)
@@ -98,6 +111,7 @@ private:
     // Fırçalar (cihaza bağlı, render target ile birlikte oluşturulur/yok edilir)
     ID2D1SolidColorBrush*  m_whiteBrush   = nullptr;   // Metin için
     ID2D1SolidColorBrush*  m_overlayBrush = nullptr;   // Yarı saydam siyah arka plan
+    ID2D1SolidColorBrush*  m_activeBrush  = nullptr;   // Info button aktif durumu
 
     IWICImagingFactory*    m_wicFactory   = nullptr;   // WIC fabrikası (GPU kurtarma için)
     ID2D1Bitmap*           m_bitmap       = nullptr;   // GPU'ya yüklenmiş görüntü

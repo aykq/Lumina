@@ -59,6 +59,7 @@ struct ViewState
     float panY              = 0.0f;   // Piksel cinsinden dikey kaydırma
     bool  showZoomIndicator = false;  // Zoom overlay gösterilsin mi?
     bool  showInfoPanel     = false;  // I tuşuyla toggle — navigasyonda sıfırlanmaz
+    bool  use12HourTime     = false;  // T tuşuyla toggle — 12h/24h saat gösterimi
     int   imageIndex        = 0;      // 1-based; 0 = klasör yok
     int   imageTotal        = 0;      // 0 = klasör yok
 };
@@ -88,6 +89,11 @@ public:
     // Mevcut bitmap'i serbest bırak (decode hatası veya gezinme öncesi temizlik)
     void ClearImage();
 
+    // Date toggle rect — DrawInfoPanel her çizimde günceller;
+    // WndProc WM_LBUTTONUP'ta tıklama kontrolü için kullanılır.
+    D2D1_RECT_F GetDateToggleRect()    const { return m_dateToggleRect; }
+    bool        IsDateToggleVisible()  const { return m_dateToggleVisible; }
+
 private:
     // GPU cihazına bağlı kaynakları oluştur
     HRESULT CreateDeviceResources();
@@ -114,10 +120,15 @@ private:
     IDWriteTextFormat*     m_indexFormat   = nullptr;  // 14 DIP Semi-Bold, center — index bar
 
     // Fırçalar (cihaza bağlı, render target ile birlikte oluşturulur/yok edilir)
-    ID2D1SolidColorBrush*  m_whiteBrush   = nullptr;   // Metin için
-    ID2D1SolidColorBrush*  m_overlayBrush = nullptr;   // Yarı saydam siyah arka plan
-    ID2D1SolidColorBrush*  m_activeBrush  = nullptr;   // Info button aktif durumu
+    ID2D1SolidColorBrush*  m_whiteBrush       = nullptr;   // Metin için
+    ID2D1SolidColorBrush*  m_overlayBrush     = nullptr;   // Yarı saydam siyah arka plan
+    ID2D1SolidColorBrush*  m_activeBrush      = nullptr;   // Info button aktif durumu
+    ID2D1SolidColorBrush*  m_toggleFillBrush  = nullptr;   // Segmented toggle aktif segment dolgusu
 
     ID2D1Bitmap*           m_bitmap       = nullptr;   // GPU'ya yüklenmiş görüntü
     std::wstring           m_imagePath;                // D2DERR_RECREATE_TARGET'ta yeniden yüklemek için
+
+    // Date toggle badge — DrawInfoPanel tarafından doldurulur
+    D2D1_RECT_F            m_dateToggleRect    = {};
+    bool                   m_dateToggleVisible = false;
 };

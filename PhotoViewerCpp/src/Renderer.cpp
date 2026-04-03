@@ -104,17 +104,21 @@ HRESULT Renderer::CreateDeviceResources()
     m_renderTarget->CreateSolidColorBrush(
         D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.22f), &m_activeBrush
     );
+    m_renderTarget->CreateSolidColorBrush(
+        D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.38f), &m_toggleFillBrush
+    );
 
     return S_OK;
 }
 
 void Renderer::DiscardDeviceResources()
 {
-    if (m_bitmap)       { m_bitmap->Release();       m_bitmap = nullptr; }
-    if (m_activeBrush)  { m_activeBrush->Release();  m_activeBrush = nullptr; }
-    if (m_whiteBrush)   { m_whiteBrush->Release();   m_whiteBrush = nullptr; }
-    if (m_overlayBrush) { m_overlayBrush->Release(); m_overlayBrush = nullptr; }
-    if (m_renderTarget) { m_renderTarget->Release(); m_renderTarget = nullptr; }
+    if (m_bitmap)           { m_bitmap->Release();           m_bitmap = nullptr; }
+    if (m_toggleFillBrush)  { m_toggleFillBrush->Release();  m_toggleFillBrush = nullptr; }
+    if (m_activeBrush)      { m_activeBrush->Release();      m_activeBrush = nullptr; }
+    if (m_whiteBrush)       { m_whiteBrush->Release();       m_whiteBrush = nullptr; }
+    if (m_overlayBrush)     { m_overlayBrush->Release();     m_overlayBrush = nullptr; }
+    if (m_renderTarget)     { m_renderTarget->Release();     m_renderTarget = nullptr; }
 }
 
 bool Renderer::LoadImageFromPixels(const uint8_t* pixels, UINT width, UINT height,
@@ -224,10 +228,38 @@ void Renderer::DrawIndexBar(const ViewState& vs)
     );
 }
 
+// ─── Tarih biçimlendirme yardımcısı ──────────────────────────────────────────
+
+// EXIF ham string: "YYYY:MM:DD HH:MM:SS"
+// 24h: "2023-07-15  14:30"   12h: "2023-07-15  2:30 PM"
+static std::wstring FormatDateTaken(const std::wstring& raw, bool use12h)
+{
+    int yr = 0, mo = 0, dy = 0, hr = 0, mi = 0, se = 0;
+    if (swscanf_s(raw.c_str(), L"%d:%d:%d %d:%d:%d",
+                  &yr, &mo, &dy, &hr, &mi, &se) == 6)
+    {
+        wchar_t buf[48];
+        if (use12h)
+        {
+            const wchar_t* ampm = (hr >= 12) ? L"PM" : L"AM";
+            int hr12 = hr % 12;
+            if (hr12 == 0) hr12 = 12;
+            swprintf_s(buf, L"%04d-%02d-%02d  %d:%02d %ls", yr, mo, dy, hr12, mi, ampm);
+        }
+        else
+        {
+            swprintf_s(buf, L"%04d-%02d-%02d  %02d:%02d", yr, mo, dy, hr, mi);
+        }
+        return buf;
+    }
+    return raw;  // ayrıştırılamadıysa ham veriyi göster
+}
+
 // ─── Info Panel ───────────────────────────────────────────────────────────────
 
 void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
 {
+    m_dateToggleVisible = false;
     if (!m_overlayBrush || !m_whiteBrush) return;
 
     D2D1_SIZE_F sz = m_renderTarget->GetSize();
@@ -326,7 +358,79 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
         );
         y += 10.0f;
 
-        DrawRow(L"Date Taken", info->dateTaken);
+        // Date Taken — etiket + değer + segmented time toggle
+        if (!info->dateTaken.empty())
+        {
+            // Etiket
+            m_renderTarget->DrawText(
+                L"Date Taken", static_cast<UINT32>(wcslen(L"Date Taken")),
+                m_labelFormat, D2D1::RectF(x0, y, x1, y + kLabelH), m_whiteBrush
+            );
+
+            // Değer
+            std::wstring dateFormatted = FormatDateTaken(info->dateTaken, vs.use12HourTime);
+            m_renderTarget->DrawText(
+                dateFormatted.c_str(), static_cast<UINT32>(dateFormatted.size()),
+                m_valueFormat,
+                D2D1::RectF(x0, y + kLabelH + kGap, x1, y + kLabelH + kGap + kValueH),
+                m_whiteBrush
+            );
+            y += kLabelH + kGap + kValueH + 6.0f;
+
+            // ── Segmented pill control: [ 24h | 12h ] ─────────────────────────
+            constexpr float kPillW = 78.0f;
+            constexpr float kPillH = 22.0f;
+            constexpr float kPillR = 11.0f;   // tam yuvarlak pill
+            constexpr float kSegW  = kPillW * 0.5f;
+
+            const float px = x0;
+            const float py = y;
+            const bool  leftActive = !vs.use12HourTime;  // sol = 24h, sağ = 12h
+
+            // Aktif segment dolgusu
+            D2D1_ROUNDED_RECT activeRR;
+            if (leftActive)
+                activeRR = { D2D1::RectF(px,        py, px + kSegW,  py + kPillH), kPillR, kPillR };
+            else
+                activeRR = { D2D1::RectF(px + kSegW, py, px + kPillW, py + kPillH), kPillR, kPillR };
+            m_renderTarget->FillRoundedRectangle(activeRR, m_toggleFillBrush);
+
+            // Pill dış çerçevesi
+            D2D1_ROUNDED_RECT pillRR = {
+                D2D1::RectF(px, py, px + kPillW, py + kPillH), kPillR, kPillR
+            };
+            m_whiteBrush->SetOpacity(0.28f);
+            m_renderTarget->DrawRoundedRectangle(pillRR, m_whiteBrush, 1.0f);
+
+            // Orta ayraç çizgisi
+            m_whiteBrush->SetOpacity(0.20f);
+            m_renderTarget->DrawLine(
+                D2D1::Point2F(px + kSegW, py + 4.0f),
+                D2D1::Point2F(px + kSegW, py + kPillH - 4.0f),
+                m_whiteBrush, 0.75f
+            );
+
+            // "24h" metni
+            m_whiteBrush->SetOpacity(leftActive ? 1.0f : 0.40f);
+            m_renderTarget->DrawText(
+                L"24h", 3, m_indexFormat,
+                D2D1::RectF(px, py, px + kSegW, py + kPillH), m_whiteBrush
+            );
+
+            // "12h" metni
+            m_whiteBrush->SetOpacity(leftActive ? 0.40f : 1.0f);
+            m_renderTarget->DrawText(
+                L"12h", 3, m_indexFormat,
+                D2D1::RectF(px + kSegW, py, px + kPillW, py + kPillH), m_whiteBrush
+            );
+            m_whiteBrush->SetOpacity(1.0f);
+
+            // Hit-test rect'ini kaydet (tüm pill)
+            m_dateToggleRect    = D2D1::RectF(px, py, px + kPillW, py + kPillH);
+            m_dateToggleVisible = true;
+
+            y += kPillH + 10.0f;
+        }
 
         // Camera make + model on one line
         if (!info->cameraMake.empty() || !info->cameraModel.empty())

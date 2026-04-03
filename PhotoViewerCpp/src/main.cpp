@@ -118,7 +118,7 @@ static float g_mouseDownX        = 0.0f;
 static float g_mouseDownY        = 0.0f;
 static bool  g_clickIsLeft       = false;
 static bool  g_clickIsInfoButton = false;
-static bool  g_suppressNextZoom  = false;  // info button çift tıklamasında zoom'u engelle
+static bool  g_clickInPanel      = false;  // Panel alanı tıklaması — drag/zoom engellenir
 
 // --- Yardımcı: arrow zone hit-test ---
 
@@ -156,9 +156,11 @@ static bool HitTestInfoButton(HWND hwnd, float x, float y, bool panelOpen)
 static void NavigateTo(HWND hwnd, const std::wstring& path)
 {
     UpdateWindowTitle(hwnd, path);
-    bool keepPanel = g_viewState.showInfoPanel;
+    bool keepPanel  = g_viewState.showInfoPanel;
+    bool keep12h    = g_viewState.use12HourTime;
     g_viewState = ViewState{};
     g_viewState.showInfoPanel = keepPanel;
+    g_viewState.use12HourTime = keep12h;
     if (g_navigator)
     {
         g_viewState.imageIndex = g_navigator->index() + 1;
@@ -253,6 +255,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         if (!g_clickIsInfoButton)
         {
+            // Panel alanına tıklandığında drag/ok/zoom engellenir
+            if (g_viewState.showInfoPanel)
+            {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                if (mx >= static_cast<float>(rc.right) - PanelLayout::Width)
+                {
+                    g_clickInPanel = true;
+                    return 0;
+                }
+            }
+
             // Ok zone kontrolü: hangi bölgeye basıldığını kaydet
             ArrowZone zone = (g_viewState.imageTotal > 0)
                              ? HitTestArrow(hwnd, mx, my, g_viewState.showInfoPanel)
@@ -288,6 +302,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_dragging = false;
         ReleaseCapture();
 
+        // Panel alanı tıklaması — yalnızca date toggle kontrol edilir
+        if (g_clickInPanel)
+        {
+            g_clickInPanel = false;
+            float delta = fabsf(mx - g_mouseDownX) + fabsf(my - g_mouseDownY);
+            if (delta < 5.0f && g_renderer && g_renderer->IsDateToggleVisible())
+            {
+                D2D1_RECT_F r = g_renderer->GetDateToggleRect();
+                if (mx >= r.left && mx <= r.right && my >= r.top && my <= r.bottom)
+                {
+                    // Sol yarı = 24h, sağ yarı = 12h
+                    float midX = (r.left + r.right) * 0.5f;
+                    g_viewState.use12HourTime = (mx >= midX);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+            return 0;
+        }
+
         // Info button tıklaması
         if (g_clickIsInfoButton)
         {
@@ -295,7 +328,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (delta < 5.0f)
             {
                 g_viewState.showInfoPanel = !g_viewState.showInfoPanel;
-                g_suppressNextZoom = true;  // Çift tıklamada zoom'u engelle
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             g_clickIsInfoButton = false;
@@ -325,15 +357,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_LBUTTONDBLCLK:
     {
-        // Info button tıklamasından gelen çift tıklamada zoom yapma
-        if (g_suppressNextZoom)
-        {
-            g_suppressNextZoom = false;
-            return 0;
-        }
-
         float cx = static_cast<float>(GET_X_LPARAM(lParam));
         float cy = static_cast<float>(GET_Y_LPARAM(lParam));
+
+        // Info button üzerine çift tıklandığında zoom yapma.
+        if (HitTestInfoButton(hwnd, cx, cy, true) || HitTestInfoButton(hwnd, cx, cy, false))
+            return 0;
+
+        // Panel alanında çift tıklamayı engelle
+        if (g_viewState.showInfoPanel)
+        {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            if (cx >= static_cast<float>(rc.right) - PanelLayout::Width)
+                return 0;
+        }
 
         if (g_viewState.zoomFactor == 1.0f)
         {
@@ -343,10 +381,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             // Zoom/pan sıfırla, ama UI durumunu koru
             bool keepPanel = g_viewState.showInfoPanel;
+            bool keep12h   = g_viewState.use12HourTime;
             int  keepIdx   = g_viewState.imageIndex;
             int  keepTotal = g_viewState.imageTotal;
             g_viewState = ViewState{};
             g_viewState.showInfoPanel = keepPanel;
+            g_viewState.use12HourTime = keep12h;
             g_viewState.imageIndex    = keepIdx;
             g_viewState.imageTotal    = keepTotal;
         }
@@ -368,6 +408,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case 'I':
             g_viewState.showInfoPanel = !g_viewState.showInfoPanel;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+
+        case 'T':
+            g_viewState.use12HourTime = !g_viewState.use12HourTime;
             InvalidateRect(hwnd, nullptr, FALSE);
             break;
 

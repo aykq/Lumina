@@ -15,6 +15,10 @@
 
 static constexpr UINT     WM_DECODE_DONE        = WM_APP + 1;
 static constexpr UINT_PTR kZoomIndicatorTimerID = 1;
+static constexpr UINT_PTR kPanelAnimTimerID     = 2;
+
+// Panel animasyon: her frame'de kalan mesafenin bu oranı kadar hareket eder (ease-out lerp)
+static constexpr float    kPanelAnimLerp        = 0.35f;
 
 // --- Arka plan decode ---
 
@@ -73,6 +77,9 @@ static void StartDecode(HWND hwnd, const std::wstring& path)
             result->info.aperture     = decoded.aperture;
             result->info.shutterSpeed = decoded.shutterSpeed;
             result->info.iso          = decoded.iso;
+            result->info.gpsLatitude  = decoded.gpsLatitude;
+            result->info.gpsLongitude = decoded.gpsLongitude;
+            result->info.gpsAltitude  = decoded.gpsAltitude;
         }
         else
         {
@@ -125,30 +132,72 @@ static bool  g_clickInPanel      = false;  // Panel alanı tıklaması — drag/
 enum class ArrowZone { None, Left, Right };
 
 // Tıklanabilir bölge: yatayda ok zone genişliği, dikeyde tam yükseklik (panel alanı hariç)
-static ArrowZone HitTestArrow(HWND hwnd, float x, float y, bool panelOpen)
+// panelW: mevcut panel genişliği (animasyonlu olabilir)
+static ArrowZone HitTestArrow(HWND hwnd, float x, float y, float panelW)
 {
     (void)y;  // Tam yükseklik — y kısıtlaması yok
     RECT rc;
     GetClientRect(hwnd, &rc);
-    float availW = static_cast<float>(rc.right) - (panelOpen ? PanelLayout::Width : 0.0f);
+    float availW = static_cast<float>(rc.right) - panelW;
     if (x < ArrowLayout::ZoneW)                         return ArrowZone::Left;
     if (x >= availW - ArrowLayout::ZoneW && x < availW) return ArrowZone::Right;
     return ArrowZone::None;
 }
 
 // --- Yardımcı: info button hit-test ---
-// Panel açıkken buton PanelLayout::Width kadar sola kaymış olur
 
-static bool HitTestInfoButton(HWND hwnd, float x, float y, bool panelOpen)
+static bool HitTestInfoButton(HWND hwnd, float x, float y, float panelW)
 {
     RECT rc;
     GetClientRect(hwnd, &rc);
-    float xOffset = panelOpen ? PanelLayout::Width : 0.0f;
-    float x0 = rc.right - InfoButton::Margin - InfoButton::Size - xOffset;
+    float x0 = rc.right - InfoButton::Margin - InfoButton::Size - panelW;
     float y0 = InfoButton::Margin;
-    float x1 = rc.right - InfoButton::Margin - xOffset;
+    float x1 = rc.right - InfoButton::Margin - panelW;
     float y1 = InfoButton::Margin + InfoButton::Size;
     return x >= x0 && x <= x1 && y >= y0 && y <= y1;
+}
+
+// --- Registry ayarları ---
+
+static constexpr wchar_t kRegKey[] = L"Software\\PhotoViewer";
+
+static void SaveSettings()
+{
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegKey, 0, nullptr,
+                        0, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS)
+    {
+        DWORD val = g_viewState.showInfoPanel ? 1 : 0;
+        RegSetValueExW(hKey, L"ShowInfoPanel",  0, REG_DWORD, reinterpret_cast<const BYTE*>(&val), sizeof(DWORD));
+        val = g_viewState.use12HourTime ? 1 : 0;
+        RegSetValueExW(hKey, L"Use12HourTime", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&val), sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+}
+
+static void LoadSettings()
+{
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRegKey, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        DWORD val = 0, sz = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"ShowInfoPanel", nullptr, nullptr, reinterpret_cast<LPBYTE>(&val), &sz) == ERROR_SUCCESS)
+            g_viewState.showInfoPanel = (val != 0);
+        sz = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"Use12HourTime", nullptr, nullptr, reinterpret_cast<LPBYTE>(&val), &sz) == ERROR_SUCCESS)
+            g_viewState.use12HourTime = (val != 0);
+        RegCloseKey(hKey);
+    }
+    // Başlangıçta animasyon yok — doğrudan hedef genişliğe atla
+    g_viewState.panelAnimWidth = g_viewState.showInfoPanel ? PanelLayout::Width : 0.0f;
+}
+
+// --- Panel animasyon başlatıcısı ---
+
+static void StartPanelAnim(HWND hwnd)
+{
+    KillTimer(hwnd, kPanelAnimTimerID);
+    SetTimer(hwnd, kPanelAnimTimerID, 16, nullptr);
 }
 
 // --- Yardımcı: ViewState'in UI alanlarını koruyarak navigasyon ---
@@ -156,11 +205,13 @@ static bool HitTestInfoButton(HWND hwnd, float x, float y, bool panelOpen)
 static void NavigateTo(HWND hwnd, const std::wstring& path)
 {
     UpdateWindowTitle(hwnd, path);
-    bool keepPanel  = g_viewState.showInfoPanel;
-    bool keep12h    = g_viewState.use12HourTime;
+    bool  keepPanel     = g_viewState.showInfoPanel;
+    float keepAnimWidth = g_viewState.panelAnimWidth;
+    bool  keep12h       = g_viewState.use12HourTime;
     g_viewState = ViewState{};
-    g_viewState.showInfoPanel = keepPanel;
-    g_viewState.use12HourTime = keep12h;
+    g_viewState.showInfoPanel  = keepPanel;
+    g_viewState.panelAnimWidth = keepAnimWidth;
+    g_viewState.use12HourTime  = keep12h;
     if (g_navigator)
     {
         g_viewState.imageIndex = g_navigator->index() + 1;
@@ -251,16 +302,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SetCapture(hwnd);
 
         // Info button önce kontrol edilir (sağ ok zone ile üst üste gelebilir)
-        g_clickIsInfoButton = HitTestInfoButton(hwnd, mx, my, g_viewState.showInfoPanel);
+        g_clickIsInfoButton = HitTestInfoButton(hwnd, mx, my, g_viewState.panelAnimWidth);
 
         if (!g_clickIsInfoButton)
         {
             // Panel alanına tıklandığında drag/ok/zoom engellenir
-            if (g_viewState.showInfoPanel)
+            if (g_viewState.panelAnimWidth > 0.0f)
             {
                 RECT rc;
                 GetClientRect(hwnd, &rc);
-                if (mx >= static_cast<float>(rc.right) - PanelLayout::Width)
+                if (mx >= static_cast<float>(rc.right) - g_viewState.panelAnimWidth)
                 {
                     g_clickInPanel = true;
                     return 0;
@@ -269,7 +320,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             // Ok zone kontrolü: hangi bölgeye basıldığını kaydet
             ArrowZone zone = (g_viewState.imageTotal > 0)
-                             ? HitTestArrow(hwnd, mx, my, g_viewState.showInfoPanel)
+                             ? HitTestArrow(hwnd, mx, my, g_viewState.panelAnimWidth)
                              : ArrowZone::None;
             g_mouseInArrowZone = (zone != ArrowZone::None);
             g_clickIsLeft      = (zone == ArrowZone::Left);
@@ -328,6 +379,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (delta < 5.0f)
             {
                 g_viewState.showInfoPanel = !g_viewState.showInfoPanel;
+                SaveSettings();
+                StartPanelAnim(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             g_clickIsInfoButton = false;
@@ -360,16 +413,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         float cx = static_cast<float>(GET_X_LPARAM(lParam));
         float cy = static_cast<float>(GET_Y_LPARAM(lParam));
 
-        // Info button üzerine çift tıklandığında zoom yapma.
-        if (HitTestInfoButton(hwnd, cx, cy, true) || HitTestInfoButton(hwnd, cx, cy, false))
+        // Ok zone'da çift tıklamayı engelle — navigasyon zaten birinci LBUTTONUP'ta gerçekleşti
+        if (HitTestArrow(hwnd, cx, cy, g_viewState.panelAnimWidth) != ArrowZone::None)
+            return 0;
+
+        // Info button üzerine çift tıklandığında zoom yapma
+        if (HitTestInfoButton(hwnd, cx, cy, g_viewState.panelAnimWidth))
             return 0;
 
         // Panel alanında çift tıklamayı engelle
-        if (g_viewState.showInfoPanel)
+        if (g_viewState.panelAnimWidth > 0.0f)
         {
             RECT rc;
             GetClientRect(hwnd, &rc);
-            if (cx >= static_cast<float>(rc.right) - PanelLayout::Width)
+            if (cx >= static_cast<float>(rc.right) - g_viewState.panelAnimWidth)
                 return 0;
         }
 
@@ -380,15 +437,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         else
         {
             // Zoom/pan sıfırla, ama UI durumunu koru
-            bool keepPanel = g_viewState.showInfoPanel;
-            bool keep12h   = g_viewState.use12HourTime;
-            int  keepIdx   = g_viewState.imageIndex;
-            int  keepTotal = g_viewState.imageTotal;
+            bool  keepPanel     = g_viewState.showInfoPanel;
+            float keepAnimWidth = g_viewState.panelAnimWidth;
+            bool  keep12h       = g_viewState.use12HourTime;
+            int   keepIdx       = g_viewState.imageIndex;
+            int   keepTotal     = g_viewState.imageTotal;
             g_viewState = ViewState{};
-            g_viewState.showInfoPanel = keepPanel;
-            g_viewState.use12HourTime = keep12h;
-            g_viewState.imageIndex    = keepIdx;
-            g_viewState.imageTotal    = keepTotal;
+            g_viewState.showInfoPanel  = keepPanel;
+            g_viewState.panelAnimWidth = keepAnimWidth;
+            g_viewState.use12HourTime  = keep12h;
+            g_viewState.imageIndex     = keepIdx;
+            g_viewState.imageTotal     = keepTotal;
         }
 
         ShowZoomIndicator(hwnd);
@@ -408,11 +467,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case 'I':
             g_viewState.showInfoPanel = !g_viewState.showInfoPanel;
+            SaveSettings();
+            StartPanelAnim(hwnd);
             InvalidateRect(hwnd, nullptr, FALSE);
             break;
 
         case 'T':
             g_viewState.use12HourTime = !g_viewState.use12HourTime;
+            SaveSettings();
             InvalidateRect(hwnd, nullptr, FALSE);
             break;
 
@@ -433,6 +495,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             KillTimer(hwnd, kZoomIndicatorTimerID);
             g_viewState.showZoomIndicator = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        else if (wParam == kPanelAnimTimerID)
+        {
+            float target = g_viewState.showInfoPanel ? PanelLayout::Width : 0.0f;
+            float diff   = target - g_viewState.panelAnimWidth;
+            if (fabsf(diff) < 1.0f)
+            {
+                g_viewState.panelAnimWidth = target;
+                KillTimer(hwnd, kPanelAnimTimerID);
+            }
+            else
+            {
+                g_viewState.panelAnimWidth += diff * kPanelAnimLerp;
+            }
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
@@ -466,6 +543,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (g_decodeThread.joinable())
             g_decodeThread.detach();
         KillTimer(hwnd, kZoomIndicatorTimerID);
+        KillTimer(hwnd, kPanelAnimTimerID);
         delete g_navigator; g_navigator = nullptr;
         delete g_renderer;  g_renderer  = nullptr;
         PostQuitMessage(0);
@@ -484,6 +562,8 @@ int WINAPI WinMain(
     _In_     int nCmdShow)
 {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    LoadSettings();
 
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);

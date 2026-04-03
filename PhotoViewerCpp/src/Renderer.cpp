@@ -172,7 +172,7 @@ void Renderer::DrawNavArrows(const ViewState& vs)
     if (!m_overlayBrush || !m_whiteBrush || !m_textFormat) return;
 
     D2D1_SIZE_F sz = m_renderTarget->GetSize();
-    float availW = sz.width - (vs.showInfoPanel ? PanelLayout::Width : 0.0f);
+    float availW = sz.width - vs.panelAnimWidth;
     float midY  = sz.height * 0.5f;
     float halfH = ArrowLayout::PillH * 0.5f;
 
@@ -215,7 +215,7 @@ void Renderer::DrawIndexBar(const ViewState& vs)
     constexpr float kH      = 34.0f;
     constexpr float kMargin = 12.0f;
 
-    float availW = sz.width - (vs.showInfoPanel ? PanelLayout::Width : 0.0f);
+    float availW = sz.width - vs.panelAnimWidth;
     D2D1_RECT_F bgRect = D2D1::RectF(
         (availW - kW) * 0.5f,   sz.height - kH - kMargin,
         (availW + kW) * 0.5f,   sz.height - kMargin
@@ -264,13 +264,13 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
 
     D2D1_SIZE_F sz = m_renderTarget->GetSize();
 
-    // Panel arka planı — sağ kenara yapışık, tam yükseklik
-    D2D1_RECT_F bg = D2D1::RectF(sz.width - PanelLayout::Width, 0.0f, sz.width, sz.height);
+    // Panel arka planı — sağ kenara yapışık, animasyonlu genişlik
+    D2D1_RECT_F bg = D2D1::RectF(sz.width - vs.panelAnimWidth, 0.0f, sz.width, sz.height);
     m_renderTarget->FillRectangle(bg, m_overlayBrush);
 
     if (!info || !m_labelFormat || !m_valueFormat) return;
 
-    float x0 = sz.width - PanelLayout::Width + PanelLayout::PadX;
+    float x0 = sz.width - vs.panelAnimWidth + PanelLayout::PadX;
     float x1 = sz.width - PanelLayout::PadX;
     float y  = PanelLayout::PadX;
 
@@ -447,6 +447,30 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
         DrawRow(L"Aperture", info->aperture);
         DrawRow(L"Shutter Speed", info->shutterSpeed);
         DrawRow(L"ISO", info->iso);
+
+        // GPS section — sadece koordinat varsa
+        if (!info->gpsLatitude.empty() || !info->gpsLongitude.empty())
+        {
+            y += 4.0f;
+            m_renderTarget->DrawLine(
+                D2D1::Point2F(x0, y), D2D1::Point2F(x1, y), m_whiteBrush, 0.5f
+            );
+            y += 10.0f;
+
+            // Lat / Lon aynı satırda tek değer olarak göster
+            if (!info->gpsLatitude.empty() && !info->gpsLongitude.empty())
+            {
+                std::wstring coords = info->gpsLatitude + L"  " + info->gpsLongitude;
+                DrawRow(L"GPS Location", coords);
+            }
+            else
+            {
+                DrawRow(L"GPS Location", info->gpsLatitude.empty()
+                    ? info->gpsLongitude : info->gpsLatitude);
+            }
+
+            DrawRow(L"Altitude", info->gpsAltitude);
+        }
     }
 }
 
@@ -460,8 +484,8 @@ void Renderer::DrawInfoButton(const ViewState& vs)
     constexpr float kSize   = InfoButton::Size;
     constexpr float kMargin = InfoButton::Margin;
 
-    // Panel açıkken buton tüm x pozisyonu sola kayar (x0 ve x1 birlikte)
-    float xOffset = vs.showInfoPanel ? PanelLayout::Width : 0.0f;
+    // Panel genişliğine göre buton sola kayar (animasyonla birlikte)
+    float xOffset = vs.panelAnimWidth;
     float x0 = sz.width - kMargin - kSize - xOffset;
     float y0 = kMargin;
     float x1 = sz.width - kMargin - xOffset;
@@ -512,7 +536,7 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
         D2D1_SIZE_F wndSize = m_renderTarget->GetSize();
         D2D1_SIZE_F imgSize = m_bitmap->GetSize();
 
-        float availW = wndSize.width - (vs.showInfoPanel ? PanelLayout::Width : 0.0f);
+        float availW = wndSize.width - vs.panelAnimWidth;
         float fitScale   = min(availW / imgSize.width, wndSize.height / imgSize.height);
         float finalScale = fitScale * vs.zoomFactor;
 
@@ -530,7 +554,7 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
     // Overlaylar (arka plandan öne doğru)
     DrawNavArrows(vs);
     DrawIndexBar(vs);
-    if (vs.showInfoPanel) DrawInfoPanel(vs, info);
+    if (vs.panelAnimWidth > 0.0f) DrawInfoPanel(vs, info);
     DrawInfoButton(vs);  // Info panelinin üstünde çizilir
 
     // Zoom indicator: sağ alt köşe

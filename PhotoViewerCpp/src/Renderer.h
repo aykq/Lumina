@@ -46,6 +46,10 @@ struct ImageInfo
     std::wstring aperture;         // e.g. L"f/2.8"
     std::wstring shutterSpeed;     // e.g. L"1/500s"
     std::wstring iso;
+    // GPS — mevcut değilse boş
+    std::wstring gpsLatitude;
+    std::wstring gpsLongitude;
+    std::wstring gpsAltitude;
     // Decode hatası — boş değilse ekranda gösterilir
     std::wstring errorMessage;
 };
@@ -59,6 +63,7 @@ struct ViewState
     float panY              = 0.0f;   // Piksel cinsinden dikey kaydırma
     bool  showZoomIndicator = false;  // Zoom overlay gösterilsin mi?
     bool  showInfoPanel     = false;  // I tuşuyla toggle — navigasyonda sıfırlanmaz
+    float panelAnimWidth    = 0.0f;   // Animasyonlu panel genişliği (0.0–PanelLayout::Width)
     bool  use12HourTime     = false;  // T tuşuyla toggle — 12h/24h saat gösterimi
     int   imageIndex        = 0;      // 1-based; 0 = klasör yok
     int   imageTotal        = 0;      // 0 = klasör yok

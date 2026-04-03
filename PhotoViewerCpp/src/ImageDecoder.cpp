@@ -99,6 +99,14 @@ static std::wstring WicQueryStr(IWICMetadataQueryReader* r, const wchar_t* q)
     return result;
 }
 
+// qPrimary denenir; boşsa qFallback — PNG/TIFF path farklılıkları için
+static std::wstring WicQueryStr2(IWICMetadataQueryReader* r,
+                                  const wchar_t* q1, const wchar_t* q2)
+{
+    auto v = WicQueryStr(r, q1);
+    return v.empty() ? WicQueryStr(r, q2) : v;
+}
+
 static std::wstring WicQueryRational(IWICMetadataQueryReader* r,
                                      const wchar_t* q, const wchar_t* mode)
 {
@@ -155,6 +163,74 @@ static std::wstring WicQueryRational(IWICMetadataQueryReader* r,
     return result;
 }
 
+static std::wstring WicQueryRational2(IWICMetadataQueryReader* r,
+                                       const wchar_t* q1, const wchar_t* q2,
+                                       const wchar_t* mode)
+{
+    auto v = WicQueryRational(r, q1, mode);
+    return v.empty() ? WicQueryRational(r, q2, mode) : v;
+}
+
+// GPS koordinat rational dizisini DMS formatında oku (ör. 40°26'47.12"N)
+static std::wstring WicQueryGPSCoord(IWICMetadataQueryReader* r,
+                                      const wchar_t* qRef, const wchar_t* qCoord)
+{
+    std::wstring ref = WicQueryStr(r, qRef);
+    if (ref.empty()) return {};
+
+    PROPVARIANT pv;
+    PropVariantInit(&pv);
+    std::wstring result;
+
+    if (SUCCEEDED(r->GetMetadataByName(qCoord, &pv)))
+    {
+        if ((pv.vt == (VT_VECTOR | VT_UI8)) && pv.cauh.cElems >= 3)
+        {
+            auto rat = [](ULARGE_INTEGER u) -> double {
+                return u.HighPart > 0 ? static_cast<double>(u.LowPart) / u.HighPart : 0.0;
+            };
+            double deg = rat(pv.cauh.pElems[0]);
+            double min = rat(pv.cauh.pElems[1]);
+            double sec = rat(pv.cauh.pElems[2]);
+            wchar_t buf[64];
+            swprintf_s(buf, L"%.0f\u00b0%02.0f\u2032%05.2f\u2033%ls",
+                       deg, min, sec, ref.c_str());
+            result = buf;
+        }
+    }
+    PropVariantClear(&pv);
+    return result;
+}
+
+// GPS irtifa oku (ör. "123.4 m")
+static std::wstring WicQueryGPSAltitude(IWICMetadataQueryReader* r,
+                                         const wchar_t* qRef, const wchar_t* qAlt)
+{
+    PROPVARIANT pvRef;
+    PropVariantInit(&pvRef);
+    bool belowSea = false;
+    if (SUCCEEDED(r->GetMetadataByName(qRef, &pvRef)))
+    {
+        if (pvRef.vt == VT_UI1) belowSea = (pvRef.bVal == 1);
+        PropVariantClear(&pvRef);
+    }
+
+    PROPVARIANT pv;
+    PropVariantInit(&pv);
+    std::wstring result;
+
+    if (SUCCEEDED(r->GetMetadataByName(qAlt, &pv)) &&
+        pv.vt == VT_UI8 && pv.uhVal.HighPart > 0)
+    {
+        double alt = static_cast<double>(pv.uhVal.LowPart) / pv.uhVal.HighPart;
+        wchar_t buf[32];
+        swprintf_s(buf, belowSea ? L"%.1f m (below)" : L"%.1f m", alt);
+        result = buf;
+    }
+    PropVariantClear(&pv);
+    return result;
+}
+
 // EXIF Orientation (1-8) → WICBitmapTransformOptions
 static WICBitmapTransformOptions ExifOrientationToTransform(UINT16 o)
 {
@@ -205,21 +281,47 @@ static bool DecodeWithWIC(const std::wstring& path, DecodeOutput& out)
             PropVariantClear(&pvO);
         }
 
-        out.cameraMake   = WicQueryStr(mqr, L"/app1/ifd/{ushort=271}");
-        out.cameraModel  = WicQueryStr(mqr, L"/app1/ifd/{ushort=272}");
-        out.dateTaken    = WicQueryStr(mqr, L"/app1/ifd/exif/{ushort=36867}");
-        out.aperture     = WicQueryRational(mqr, L"/app1/ifd/exif/{ushort=33437}", L"aperture");
-        out.shutterSpeed = WicQueryRational(mqr, L"/app1/ifd/exif/{ushort=33434}", L"shutter");
+        // Make/model/date: JPEG = /app1/ifd/..., TIFF = /ifd/... (PNG eXIf de aynı)
+        out.cameraMake   = WicQueryStr2(mqr, L"/app1/ifd/{ushort=271}",        L"/ifd/{ushort=271}");
+        out.cameraModel  = WicQueryStr2(mqr, L"/app1/ifd/{ushort=272}",        L"/ifd/{ushort=272}");
+        out.dateTaken    = WicQueryStr2(mqr, L"/app1/ifd/exif/{ushort=36867}", L"/ifd/exif/{ushort=36867}");
+        out.aperture     = WicQueryRational2(mqr, L"/app1/ifd/exif/{ushort=33437}", L"/ifd/exif/{ushort=33437}", L"aperture");
+        out.shutterSpeed = WicQueryRational2(mqr, L"/app1/ifd/exif/{ushort=33434}", L"/ifd/exif/{ushort=33434}", L"shutter");
 
-        PROPVARIANT pvIso;
-        PropVariantInit(&pvIso);
-        if (SUCCEEDED(mqr->GetMetadataByName(L"/app1/ifd/exif/{ushort=34855}", &pvIso)))
+        // ISO
+        auto readIso = [&](const wchar_t* q)
         {
-            wchar_t buf[16];
-            if      (pvIso.vt == VT_UI2) { swprintf_s(buf, L"%u",  static_cast<unsigned>(pvIso.uiVal)); out.iso = buf; }
-            else if (pvIso.vt == VT_UI4) { swprintf_s(buf, L"%lu", pvIso.ulVal);                         out.iso = buf; }
-            PropVariantClear(&pvIso);
-        }
+            PROPVARIANT pvIso;
+            PropVariantInit(&pvIso);
+            if (SUCCEEDED(mqr->GetMetadataByName(q, &pvIso)))
+            {
+                wchar_t buf[16];
+                if      (pvIso.vt == VT_UI2) { swprintf_s(buf, L"%u",  static_cast<unsigned>(pvIso.uiVal)); out.iso = buf; }
+                else if (pvIso.vt == VT_UI4) { swprintf_s(buf, L"%lu", pvIso.ulVal);                         out.iso = buf; }
+                PropVariantClear(&pvIso);
+            }
+        };
+        readIso(L"/app1/ifd/exif/{ushort=34855}");
+        if (out.iso.empty()) readIso(L"/ifd/exif/{ushort=34855}");
+
+        // GPS koordinatları — JPEG: /app1/ifd/gps/..., TIFF: /ifd/gps/...
+        out.gpsLatitude  = WicQueryGPSCoord(mqr,
+            L"/app1/ifd/gps/{ushort=1}", L"/app1/ifd/gps/{ushort=2}");
+        out.gpsLongitude = WicQueryGPSCoord(mqr,
+            L"/app1/ifd/gps/{ushort=3}", L"/app1/ifd/gps/{ushort=4}");
+        out.gpsAltitude  = WicQueryGPSAltitude(mqr,
+            L"/app1/ifd/gps/{ushort=5}", L"/app1/ifd/gps/{ushort=6}");
+
+        // GPS TIFF fallback
+        if (out.gpsLatitude.empty())
+            out.gpsLatitude  = WicQueryGPSCoord(mqr,
+                L"/ifd/gps/{ushort=1}", L"/ifd/gps/{ushort=2}");
+        if (out.gpsLongitude.empty())
+            out.gpsLongitude = WicQueryGPSCoord(mqr,
+                L"/ifd/gps/{ushort=3}", L"/ifd/gps/{ushort=4}");
+        if (out.gpsAltitude.empty())
+            out.gpsAltitude  = WicQueryGPSAltitude(mqr,
+                L"/ifd/gps/{ushort=5}", L"/ifd/gps/{ushort=6}");
 
         mqr->Release();
     }

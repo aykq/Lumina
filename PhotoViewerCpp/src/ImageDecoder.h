@@ -19,6 +19,10 @@ struct DecodeOutput
     std::wstring aperture;         // ör. L"f/2.8"
     std::wstring shutterSpeed;     // ör. L"1/500s"
     std::wstring iso;
+    // GPS — yoksa boş
+    std::wstring gpsLatitude;      // ör. L"40°26'47.12\"N"
+    std::wstring gpsLongitude;     // ör. L"79°58'30.45\"W"
+    std::wstring gpsAltitude;      // ör. L"123.4 m"
 };
 
 // Desteklenen tüm formatları 32bpp BGRA pre-multiplied piksellere decode eder.

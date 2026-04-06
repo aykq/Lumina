@@ -27,6 +27,12 @@ struct DecodeOutput
     bool         hasGpsDecimal  = false;
     double       gpsLatDecimal  = 0.0;  // N = pozitif, S = negatif
     double       gpsLonDecimal  = 0.0;  // E = pozitif, W = negatif
+    // OSM harita tile — GPS varsa ve indirme başarılıysa dolu; yoksa mapTilePixels boş
+    std::vector<uint8_t> mapTilePixels;  // BGRA pre-multiplied
+    UINT         mapTileWidth   = 0;
+    UINT         mapTileHeight  = 0;
+    float        mapMarkerX     = 0.5f;  // tile içindeki yatay konum (0..1)
+    float        mapMarkerY     = 0.5f;  // tile içindeki dikey konum (0..1)
 };
 
 // Desteklenen tüm formatları 32bpp BGRA pre-multiplied piksellere decode eder.

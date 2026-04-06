@@ -1,8 +1,12 @@
 #include "ImageDecoder.h"
 
 #include <wincodec.h>
+#include <winhttp.h>
 #include <cwchar>
 #include <cstring>  // memcpy
+#include <cmath>    // std::pow, std::floor, std::tan, std::cos, std::log
+
+#pragma comment(lib, "winhttp.lib")
 
 // vcpkg bundled decoders
 #include <webp/decode.h>
@@ -847,6 +851,150 @@ static bool DecodeAVIF(const std::wstring& path, DecodeOutput& out)
     return true;
 }
 
+// ─── OSM harita tile indirici ─────────────────────────────────────────────────
+// GPS ondalık koordinatlarından zoom 15 OSM tile'ını WinHTTP+WIC ile indirir.
+// Başarılıysa out.mapTilePixels dolu olur; hata durumunda sessizce döner.
+
+static void DownloadOsmTile(double lat, double lon, DecodeOutput& out)
+{
+    constexpr int kZoom = 15;
+    constexpr double kPi = 3.14159265358979323846;
+
+    // Tile koordinatlarını hesapla
+    const double n   = std::pow(2.0, kZoom);
+    const double xf  = (lon + 180.0) / 360.0 * n;
+    const double latR = lat * kPi / 180.0;
+    const double yf  = (1.0 - std::log(std::tan(latR) + 1.0 / std::cos(latR)) / kPi) / 2.0 * n;
+
+    const int tx = static_cast<int>(std::floor(xf));
+    const int ty = static_cast<int>(std::floor(yf));
+    out.mapMarkerX = static_cast<float>(xf - tx);
+    out.mapMarkerY = static_cast<float>(yf - ty);
+
+    // URL yolu: /{zoom}/{x}/{y}.png
+    wchar_t tilePath[64];
+    swprintf_s(tilePath, L"/%d/%d/%d.png", kZoom, tx, ty);
+
+    // ── WinHTTP ile tile indir ────────────────────────────────────────────────
+    HINTERNET hSession = WinHttpOpen(L"PhotoViewer/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return;
+
+    WinHttpSetTimeouts(hSession, 5000, 5000, 10000, 10000);
+
+    HINTERNET hConnect = WinHttpConnect(hSession,
+        L"tile.openstreetmap.org", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", tilePath,
+        nullptr, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hRequest)
+    {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return;
+    }
+
+    bool ok = WinHttpSendRequest(hRequest,
+        WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        WINHTTP_NO_REQUEST_DATA, 0, 0, 0) != 0;
+    ok = ok && WinHttpReceiveResponse(hRequest, nullptr) != 0;
+
+    std::vector<uint8_t> pngBytes;
+    if (ok)
+    {
+        for (;;)
+        {
+            DWORD avail = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &avail) || avail == 0) break;
+            size_t prev = pngBytes.size();
+            pngBytes.resize(prev + avail);
+            DWORD read = 0;
+            if (!WinHttpReadData(hRequest, pngBytes.data() + prev, avail, &read))
+            {
+                pngBytes.clear();
+                break;
+            }
+            pngBytes.resize(prev + read);
+        }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    if (pngBytes.empty()) return;
+
+    // ── WIC ile PNG decode → BGRA pre-multiplied ─────────────────────────────
+    IWICImagingFactory* wic = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))))
+        return;
+
+    // PNG byte'larını bellek stream'e sar
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, pngBytes.size());
+    if (!hg) { wic->Release(); return; }
+    void* mem = GlobalLock(hg);
+    memcpy(mem, pngBytes.data(), pngBytes.size());
+    GlobalUnlock(hg);
+
+    IStream* stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(hg, TRUE, &stream)))
+    {
+        GlobalFree(hg);
+        wic->Release();
+        return;
+    }
+
+    IWICBitmapDecoder* decoder = nullptr;
+    HRESULT hr = wic->CreateDecoderFromStream(stream, nullptr,
+        WICDecodeMetadataCacheOnDemand, &decoder);
+    stream->Release();
+    if (FAILED(hr)) { wic->Release(); return; }
+
+    IWICBitmapFrameDecode* frame = nullptr;
+    hr = decoder->GetFrame(0, &frame);
+    decoder->Release();
+    if (FAILED(hr)) { wic->Release(); return; }
+
+    IWICFormatConverter* converter = nullptr;
+    hr = wic->CreateFormatConverter(&converter);
+    if (SUCCEEDED(hr))
+    {
+        hr = converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone, nullptr, 0.0f, WICBitmapPaletteTypeMedianCut);
+    }
+    frame->Release();
+
+    if (FAILED(hr))
+    {
+        if (converter) converter->Release();
+        wic->Release();
+        return;
+    }
+
+    UINT w = 0, h = 0;
+    converter->GetSize(&w, &h);
+    const UINT stride = w * 4;
+    out.mapTilePixels.resize(static_cast<size_t>(stride) * h);
+    hr = converter->CopyPixels(nullptr, stride,
+        static_cast<UINT>(out.mapTilePixels.size()), out.mapTilePixels.data());
+
+    converter->Release();
+    wic->Release();
+
+    if (FAILED(hr))
+    {
+        out.mapTilePixels.clear();
+        return;
+    }
+
+    out.mapTileWidth  = w;
+    out.mapTileHeight = h;
+}
+
 // ─── Ana dispatch ─────────────────────────────────────────────────────────────
 
 bool DecodeImage(const std::wstring& path, DecodeOutput& out)
@@ -863,18 +1011,21 @@ bool DecodeImage(const std::wstring& path, DecodeOutput& out)
     // Format etiketi
     out.format = (ext == L"JPG") ? L"JPEG" : ext;
 
+    bool ok;
     if (ext == L"WEBP")
-        return DecodeWebP(path, out);
+        ok = DecodeWebP(path, out);
+    else if (ext == L"HEIC" || ext == L"HEIF")
+        ok = DecodeHEIF(path, out);
+    else if (ext == L"JXL")
+        ok = DecodeJXL(path, out);
+    else if (ext == L"AVIF")
+        ok = DecodeAVIF(path, out);
+    else
+        ok = DecodeWithWIC(path, out);  // JPEG, PNG, BMP, GIF, TIFF, ICO
 
-    if (ext == L"HEIC" || ext == L"HEIF")
-        return DecodeHEIF(path, out);
+    // GPS koordinatları varsa harita tile'ını arka planda indir
+    if (ok && out.hasGpsDecimal)
+        DownloadOsmTile(out.gpsLatDecimal, out.gpsLonDecimal, out);
 
-    if (ext == L"JXL")
-        return DecodeJXL(path, out);
-
-    if (ext == L"AVIF")
-        return DecodeAVIF(path, out);
-
-    // JPEG, PNG, BMP, GIF, TIFF, ICO → WIC
-    return DecodeWithWIC(path, out);
+    return ok;
 }

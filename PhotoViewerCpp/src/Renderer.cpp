@@ -120,18 +120,41 @@ HRESULT Renderer::CreateDeviceResources()
     m_renderTarget->CreateSolidColorBrush(
         D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.38f), &m_toggleFillBrush
     );
+    m_renderTarget->CreateSolidColorBrush(
+        D2D1::ColorF(0.90f, 0.18f, 0.18f, 1.0f), &m_markerBrush
+    );
 
     return S_OK;
 }
 
 void Renderer::DiscardDeviceResources()
 {
+    if (m_mapTileBitmap)    { m_mapTileBitmap->Release();    m_mapTileBitmap = nullptr; }
     if (m_bitmap)           { m_bitmap->Release();           m_bitmap = nullptr; }
+    if (m_markerBrush)      { m_markerBrush->Release();      m_markerBrush = nullptr; }
     if (m_toggleFillBrush)  { m_toggleFillBrush->Release();  m_toggleFillBrush = nullptr; }
     if (m_activeBrush)      { m_activeBrush->Release();      m_activeBrush = nullptr; }
     if (m_whiteBrush)       { m_whiteBrush->Release();       m_whiteBrush = nullptr; }
     if (m_overlayBrush)     { m_overlayBrush->Release();     m_overlayBrush = nullptr; }
     if (m_renderTarget)     { m_renderTarget->Release();     m_renderTarget = nullptr; }
+}
+
+void Renderer::LoadMapTile(const uint8_t* pixels, UINT w, UINT h, float markerX, float markerY)
+{
+    if (m_mapTileBitmap) { m_mapTileBitmap->Release(); m_mapTileBitmap = nullptr; }
+    if (FAILED(CreateDeviceResources()) || !m_renderTarget) return;
+
+    D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
+    );
+    m_renderTarget->CreateBitmap(D2D1::SizeU(w, h), pixels, w * 4, props, &m_mapTileBitmap);
+    m_mapMarkerX = markerX;
+    m_mapMarkerY = markerY;
+}
+
+void Renderer::ClearMapTile()
+{
+    if (m_mapTileBitmap) { m_mapTileBitmap->Release(); m_mapTileBitmap = nullptr; }
 }
 
 bool Renderer::LoadImageFromPixels(const uint8_t* pixels, UINT width, UINT height,
@@ -521,6 +544,71 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
                 );
             }
             y += kRowH;
+
+            // ── Harita önizlemesi ─────────────────────────────────────────────
+            if (m_mapTileBitmap && m_markerBrush)
+            {
+                constexpr float kMapH = 160.0f;
+                float mapW = x1 - x0;
+                float mapY = y;
+
+                D2D1_SIZE_F tileSize = m_mapTileBitmap->GetSize();
+
+                // Tile'ı yatayda panel genişliğine ölçekle (kare tile için eşit scale)
+                float scale    = mapW / tileSize.width;
+                float scaledTH = tileSize.height * scale;
+
+                // Marker'ı dikey olarak kMapH ortasına hizala
+                float markerScaledY = m_mapMarkerY * scaledTH;
+                float destY = mapY + kMapH * 0.5f - markerScaledY;
+
+                // Tile alanı aşmasın
+                if (scaledTH > kMapH)
+                {
+                    float minDestY = mapY + kMapH - scaledTH;
+                    float maxDestY = mapY;
+                    if (destY < minDestY) destY = minDestY;
+                    if (destY > maxDestY) destY = maxDestY;
+                }
+                else
+                {
+                    destY = mapY + (kMapH - scaledTH) * 0.5f;
+                }
+
+                D2D1_RECT_F clipRect = D2D1::RectF(x0, mapY, x0 + mapW, mapY + kMapH);
+                m_renderTarget->PushAxisAlignedClip(clipRect, D2D1_ANTIALIAS_MODE_ALIASED);
+
+                // Tile çiz
+                m_renderTarget->DrawBitmap(
+                    m_mapTileBitmap,
+                    D2D1::RectF(x0, destY, x0 + mapW, destY + scaledTH)
+                );
+
+                // Marker pin — gerçek konum
+                float markerPx = x0 + m_mapMarkerX * mapW;
+                float markerPy = destY + m_mapMarkerY * scaledTH;
+
+                // Outer white circle (r=8)
+                m_whiteBrush->SetOpacity(1.0f);
+                m_renderTarget->FillEllipse(
+                    D2D1::Ellipse(D2D1::Point2F(markerPx, markerPy), 8.0f, 8.0f),
+                    m_whiteBrush
+                );
+                // Inner red circle (r=5)
+                m_renderTarget->FillEllipse(
+                    D2D1::Ellipse(D2D1::Point2F(markerPx, markerPy), 5.0f, 5.0f),
+                    m_markerBrush
+                );
+
+                m_renderTarget->PopAxisAlignedClip();
+
+                // Harita kenarlığı
+                m_whiteBrush->SetOpacity(0.25f);
+                m_renderTarget->DrawRectangle(clipRect, m_whiteBrush, 1.0f);
+                m_whiteBrush->SetOpacity(1.0f);
+
+                y += kMapH + 6.0f;
+            }
 
             DrawRow(L"Altitude", info->gpsAltitude);
         }

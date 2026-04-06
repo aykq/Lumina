@@ -107,6 +107,10 @@ public:
     D2D1_RECT_F GetGpsLinkRect()    const { return m_gpsLinkRect; }
     bool        IsGpsLinkVisible()  const { return m_gpsLinkVisible; }
 
+    // Harita tile bitmap — WM_DECODE_DONE'dan sonra çağrılır
+    void LoadMapTile(const uint8_t* pixels, UINT w, UINT h, float markerX, float markerY);
+    void ClearMapTile();
+
 private:
     // GPU cihazına bağlı kaynakları oluştur
     HRESULT CreateDeviceResources();
@@ -149,4 +153,12 @@ private:
     // GPS link rect — DrawInfoPanel tarafından doldurulur
     D2D1_RECT_F            m_gpsLinkRect    = {};
     bool                   m_gpsLinkVisible = false;
+
+    // Harita tile bitmap (cihaza bağlı) + marker konumu
+    ID2D1Bitmap*           m_mapTileBitmap = nullptr;
+    float                  m_mapMarkerX    = 0.5f;
+    float                  m_mapMarkerY    = 0.5f;
+
+    // Marker pin fırçası — kırmızı, cihaza bağlı
+    ID2D1SolidColorBrush*  m_markerBrush   = nullptr;
 };

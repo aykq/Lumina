@@ -30,6 +30,12 @@ struct DecodeResult
     std::wstring path;
     uint64_t generation = 0;
     ImageInfo info;   // decode thread'inde doldurulur
+    // OSM harita tile — GPS varsa ve indirme başarılıysa dolu
+    std::vector<uint8_t> mapTilePixels;
+    UINT  mapTileWidth  = 0;
+    UINT  mapTileHeight = 0;
+    float mapMarkerX    = 0.5f;
+    float mapMarkerY    = 0.5f;
 };
 
 static std::atomic<uint64_t> g_decodeGeneration{0};
@@ -83,6 +89,11 @@ static void StartDecode(HWND hwnd, const std::wstring& path)
             result->info.hasGpsDecimal = decoded.hasGpsDecimal;
             result->info.gpsLatDecimal = decoded.gpsLatDecimal;
             result->info.gpsLonDecimal = decoded.gpsLonDecimal;
+            result->mapTilePixels      = std::move(decoded.mapTilePixels);
+            result->mapTileWidth       = decoded.mapTileWidth;
+            result->mapTileHeight      = decoded.mapTileHeight;
+            result->mapMarkerX         = decoded.mapMarkerX;
+            result->mapMarkerY         = decoded.mapMarkerY;
         }
         else
         {
@@ -575,6 +586,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_renderer->ClearImage();
             }
             g_imageInfo = result->info;
+
+            // Harita tile — yükle veya öncekini temizle
+            if (!result->mapTilePixels.empty())
+                g_renderer->LoadMapTile(result->mapTilePixels.data(),
+                    result->mapTileWidth, result->mapTileHeight,
+                    result->mapMarkerX, result->mapMarkerY);
+            else
+                g_renderer->ClearMapTile();
+
             InvalidateRect(hwnd, nullptr, FALSE);
         }
 

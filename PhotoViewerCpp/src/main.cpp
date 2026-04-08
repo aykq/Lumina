@@ -16,6 +16,7 @@
 static constexpr UINT     WM_DECODE_DONE        = WM_APP + 1;
 static constexpr UINT_PTR kZoomIndicatorTimerID = 1;
 static constexpr UINT_PTR kPanelAnimTimerID     = 2;
+static constexpr UINT_PTR kAnimTimerID          = 3;
 
 // Panel animasyon: her frame'de kalan mesafenin bu oranı kadar hareket eder (ease-out lerp)
 static constexpr float    kPanelAnimLerp        = 0.35f;
@@ -30,12 +31,8 @@ struct DecodeResult
     std::wstring path;
     uint64_t generation = 0;
     ImageInfo info;   // decode thread'inde doldurulur
-    // OSM harita tile — GPS varsa ve indirme başarılıysa dolu
-    std::vector<uint8_t> mapTilePixels;
-    UINT  mapTileWidth  = 0;
-    UINT  mapTileHeight = 0;
-    float mapMarkerX    = 0.5f;
-    float mapMarkerY    = 0.5f;
+    // Animasyon frame'leri — boş = statik görüntü
+    std::vector<AnimFrame> frames;
 };
 
 static std::atomic<uint64_t> g_decodeGeneration{0};
@@ -69,9 +66,13 @@ static void StartDecode(HWND hwnd, const std::wstring& path)
 
         // ── Decode (tüm format desteği ImageDecoder'da) ──────────────────────
         DecodeOutput decoded;
-        if (DecodeImage(path, decoded) && !decoded.pixels.empty())
+        bool decodeOk = DecodeImage(path, decoded);
+        bool hasContent = decodeOk && (!decoded.pixels.empty() || !decoded.frames.empty());
+
+        if (hasContent)
         {
             result->pixels            = std::move(decoded.pixels);
+            result->frames            = std::move(decoded.frames);
             result->width             = decoded.width;
             result->height            = decoded.height;
             result->info.width        = static_cast<int>(decoded.width);
@@ -83,17 +84,13 @@ static void StartDecode(HWND hwnd, const std::wstring& path)
             result->info.aperture     = decoded.aperture;
             result->info.shutterSpeed = decoded.shutterSpeed;
             result->info.iso          = decoded.iso;
-            result->info.gpsLatitude   = decoded.gpsLatitude;
-            result->info.gpsLongitude  = decoded.gpsLongitude;
-            result->info.gpsAltitude   = decoded.gpsAltitude;
-            result->info.hasGpsDecimal = decoded.hasGpsDecimal;
-            result->info.gpsLatDecimal = decoded.gpsLatDecimal;
-            result->info.gpsLonDecimal = decoded.gpsLonDecimal;
-            result->mapTilePixels      = std::move(decoded.mapTilePixels);
-            result->mapTileWidth       = decoded.mapTileWidth;
-            result->mapTileHeight      = decoded.mapTileHeight;
-            result->mapMarkerX         = decoded.mapMarkerX;
-            result->mapMarkerY         = decoded.mapMarkerY;
+            result->info.gpsLatitude     = decoded.gpsLatitude;
+            result->info.gpsLongitude    = decoded.gpsLongitude;
+            result->info.gpsAltitude     = decoded.gpsAltitude;
+            result->info.hasGpsDecimal   = decoded.hasGpsDecimal;
+            result->info.gpsLatDecimal   = decoded.gpsLatDecimal;
+            result->info.gpsLonDecimal   = decoded.gpsLonDecimal;
+            result->info.gpsLocationName = decoded.gpsLocationName;
         }
         else
         {
@@ -126,6 +123,9 @@ static FolderNavigator* g_navigator = nullptr;
 static ViewState        g_viewState;
 static ImageInfo        g_imageInfo;
 
+struct SavedWindowRect { int x, y, w, h; bool valid; };
+static SavedWindowRect  g_savedWindowRect = {};
+
 // Pan sürükleme durumu
 static bool  g_dragging        = false;
 static float g_dragStartX      = 0.0f;
@@ -140,6 +140,7 @@ static float g_mouseDownY        = 0.0f;
 static bool  g_clickIsLeft       = false;
 static bool  g_clickIsInfoButton = false;
 static bool  g_clickInPanel      = false;  // Panel alanı tıklaması — drag/zoom engellenir
+
 
 // --- Yardımcı: arrow zone hit-test ---
 
@@ -189,6 +190,41 @@ static void SaveSettings()
     }
 }
 
+static void SaveWindowPlacement(HWND hwnd)
+{
+    RECT rc;
+    if (IsIconic(hwnd))
+    {
+        // Küçültülmüşse normal (restored) pozisyonu al
+        WINDOWPLACEMENT wp = { sizeof(WINDOWPLACEMENT) };
+        if (!GetWindowPlacement(hwnd, &wp)) return;
+        rc = wp.rcNormalPosition;
+    }
+    else
+    {
+        GetWindowRect(hwnd, &rc);
+    }
+
+    int w = rc.right  - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w < 100 || h < 100) return;  // Anormal değerleri kaydetme
+
+    HKEY hKey;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegKey, 0, nullptr,
+                        0, KEY_WRITE, nullptr, &hKey, nullptr) == ERROR_SUCCESS)
+    {
+        DWORD dx = static_cast<DWORD>(rc.left);
+        DWORD dy = static_cast<DWORD>(rc.top);
+        DWORD dw = static_cast<DWORD>(w);
+        DWORD dh = static_cast<DWORD>(h);
+        RegSetValueExW(hKey, L"WindowX", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dx), sizeof(DWORD));
+        RegSetValueExW(hKey, L"WindowY", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dy), sizeof(DWORD));
+        RegSetValueExW(hKey, L"WindowW", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dw), sizeof(DWORD));
+        RegSetValueExW(hKey, L"WindowH", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&dh), sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+}
+
 static void LoadSettings()
 {
     // Sistem locale'ini varsayılan olarak kullan (LOCALE_ITIME: "0"=12h, "1"=24h)
@@ -205,6 +241,25 @@ static void LoadSettings()
         sz = sizeof(DWORD);
         if (RegQueryValueExW(hKey, L"Use12HourTime", nullptr, nullptr, reinterpret_cast<LPBYTE>(&val), &sz) == ERROR_SUCCESS)
             g_viewState.use12HourTime = (val != 0);
+
+        // Pencere pozisyon/boyut
+        DWORD wx = 0, wy = 0, ww = 0, wh = 0;
+        DWORD szD = sizeof(DWORD);
+        bool hasX = RegQueryValueExW(hKey, L"WindowX", nullptr, nullptr, reinterpret_cast<LPBYTE>(&wx), &szD) == ERROR_SUCCESS; szD = sizeof(DWORD);
+        bool hasY = RegQueryValueExW(hKey, L"WindowY", nullptr, nullptr, reinterpret_cast<LPBYTE>(&wy), &szD) == ERROR_SUCCESS; szD = sizeof(DWORD);
+        bool hasW = RegQueryValueExW(hKey, L"WindowW", nullptr, nullptr, reinterpret_cast<LPBYTE>(&ww), &szD) == ERROR_SUCCESS; szD = sizeof(DWORD);
+        bool hasH = RegQueryValueExW(hKey, L"WindowH", nullptr, nullptr, reinterpret_cast<LPBYTE>(&wh), &szD) == ERROR_SUCCESS;
+
+        if (hasX && hasY && hasW && hasH && ww >= 100 && wh >= 100)
+        {
+            int ix = static_cast<int>(wx), iy = static_cast<int>(wy);
+            int iw = static_cast<int>(ww), ih = static_cast<int>(wh);
+            // Pencerenin en az bir monitörle kesiştiğini doğrula
+            RECT rc = { ix, iy, ix + iw, iy + ih };
+            if (MonitorFromRect(&rc, MONITOR_DEFAULTTONULL) != nullptr)
+                g_savedWindowRect = { ix, iy, iw, ih, true };
+        }
+
         RegCloseKey(hKey);
     }
     // Başlangıçta animasyon yok — doğrudan hedef genişliğe atla
@@ -223,6 +278,8 @@ static void StartPanelAnim(HWND hwnd)
 
 static void NavigateTo(HWND hwnd, const std::wstring& path)
 {
+    KillTimer(hwnd, kAnimTimerID);
+    if (g_renderer) g_renderer->ClearAnimation();
     UpdateWindowTitle(hwnd, path);
     bool  keepPanel     = g_viewState.showInfoPanel;
     float keepAnimWidth = g_viewState.panelAnimWidth;
@@ -304,8 +361,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         cursor.y = GET_Y_LPARAM(lParam);
         ScreenToClient(hwnd, &cursor);
 
+        float cx = static_cast<float>(cursor.x);
+        float cy = static_cast<float>(cursor.y);
         float newZoom = g_viewState.zoomFactor * (delta > 0 ? 1.1f : (1.0f / 1.1f));
-        ApplyZoom(hwnd, static_cast<float>(cursor.x), static_cast<float>(cursor.y), newZoom);
+        ApplyZoom(hwnd, cx, cy, newZoom);
         ShowZoomIndicator(hwnd);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -567,6 +626,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             InvalidateRect(hwnd, nullptr, FALSE);
         }
+        else if (wParam == kAnimTimerID)
+        {
+            KillTimer(hwnd, kAnimTimerID);
+            if (g_renderer && g_renderer->IsAnimated())
+            {
+                int nextDur = g_renderer->AdvanceFrame();
+                SetTimer(hwnd, kAnimTimerID, static_cast<UINT>(nextDur), nullptr);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
         return 0;
 
     case WM_DECODE_DONE:
@@ -575,8 +644,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         if (result->generation == g_decodeGeneration.load() && g_renderer)
         {
-            if (!result->pixels.empty())
+            // Önceki animasyonu ve timer'ı temizle
+            KillTimer(hwnd, kAnimTimerID);
+            g_renderer->ClearAnimation();
+
+            if (!result->frames.empty())
             {
+                // Animated görüntü
+                g_renderer->ClearImage();
+                g_renderer->LoadAnimationFrames(result->frames);
+                int firstDur = g_renderer->GetCurrentFrameDuration();
+                SetTimer(hwnd, kAnimTimerID, static_cast<UINT>(firstDur), nullptr);
+            }
+            else if (!result->pixels.empty())
+            {
+                // Statik görüntü
                 g_renderer->LoadImageFromPixels(
                     result->pixels.data(), result->width, result->height, result->path);
             }
@@ -586,15 +668,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 g_renderer->ClearImage();
             }
             g_imageInfo = result->info;
-
-            // Harita tile — yükle veya öncekini temizle
-            if (!result->mapTilePixels.empty())
-                g_renderer->LoadMapTile(result->mapTilePixels.data(),
-                    result->mapTileWidth, result->mapTileHeight,
-                    result->mapMarkerX, result->mapMarkerY);
-            else
-                g_renderer->ClearMapTile();
-
             InvalidateRect(hwnd, nullptr, FALSE);
         }
 
@@ -603,11 +676,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_DESTROY:
+        SaveWindowPlacement(hwnd);
         ++g_decodeGeneration;
         if (g_decodeThread.joinable())
             g_decodeThread.detach();
         KillTimer(hwnd, kZoomIndicatorTimerID);
         KillTimer(hwnd, kPanelAnimTimerID);
+        KillTimer(hwnd, kAnimTimerID);
         delete g_navigator; g_navigator = nullptr;
         delete g_renderer;  g_renderer  = nullptr;
         PostQuitMessage(0);
@@ -653,13 +728,17 @@ int WINAPI WinMain(
         title = name + L" \u2014 PhotoViewer";
     }
 
+    int winX = g_savedWindowRect.valid ? g_savedWindowRect.x : CW_USEDEFAULT;
+    int winY = g_savedWindowRect.valid ? g_savedWindowRect.y : CW_USEDEFAULT;
+    int winW = g_savedWindowRect.valid ? g_savedWindowRect.w : 1280;
+    int winH = g_savedWindowRect.valid ? g_savedWindowRect.h : 800;
+
     HWND hwnd = CreateWindowEx(
         0,
         L"PhotoViewerWindow",
         title.c_str(),
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        1280, 800,
+        winX, winY, winW, winH,
         nullptr, nullptr, hInstance, nullptr
     );
 

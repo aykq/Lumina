@@ -6,6 +6,8 @@
 #include <wincodec.h>
 #include <string>
 #include <cstdint>
+#include <vector>
+#include "ImageDecoder.h"
 
 // Direct2D, DirectWrite ve WIC kütüphanelerini otomatik linkle
 #pragma comment(lib, "d2d1.lib")
@@ -50,10 +52,12 @@ struct ImageInfo
     std::wstring gpsLatitude;
     std::wstring gpsLongitude;
     std::wstring gpsAltitude;
-    // GPS ondalık derece — harita linki için; hasGpsDecimal false ise geçersiz
+    // GPS ondalık derece — OSM linki için; hasGpsDecimal false ise geçersiz
     bool         hasGpsDecimal  = false;
     double       gpsLatDecimal  = 0.0;
     double       gpsLonDecimal  = 0.0;
+    // Nominatim konum adı — ör. L"Merzifon, Amasya, Türkiye"
+    std::wstring gpsLocationName;
     // Decode hatası — boş değilse ekranda gösterilir
     std::wstring errorMessage;
 };
@@ -107,9 +111,12 @@ public:
     D2D1_RECT_F GetGpsLinkRect()    const { return m_gpsLinkRect; }
     bool        IsGpsLinkVisible()  const { return m_gpsLinkVisible; }
 
-    // Harita tile bitmap — WM_DECODE_DONE'dan sonra çağrılır
-    void LoadMapTile(const uint8_t* pixels, UINT w, UINT h, float markerX, float markerY);
-    void ClearMapTile();
+    // Animasyon — WM_DECODE_DONE'dan sonra çağrılır
+    void LoadAnimationFrames(const std::vector<AnimFrame>& frames);
+    void ClearAnimation();
+    bool IsAnimated()            const { return !m_animBitmaps.empty(); }
+    int  AdvanceFrame();               // bir sonraki frame'e geç, yeni frame süresi (ms) döner
+    int  GetCurrentFrameDuration() const;
 
 private:
     // GPU cihazına bağlı kaynakları oluştur
@@ -154,11 +161,8 @@ private:
     D2D1_RECT_F            m_gpsLinkRect    = {};
     bool                   m_gpsLinkVisible = false;
 
-    // Harita tile bitmap (cihaza bağlı) + marker konumu
-    ID2D1Bitmap*           m_mapTileBitmap = nullptr;
-    float                  m_mapMarkerX    = 0.5f;
-    float                  m_mapMarkerY    = 0.5f;
-
-    // Marker pin fırçası — kırmızı, cihaza bağlı
-    ID2D1SolidColorBrush*  m_markerBrush   = nullptr;
+    // Animasyon bitmap dizisi (cihaza bağlı) + frame süresi
+    std::vector<ID2D1Bitmap*> m_animBitmaps;
+    std::vector<int>          m_animDurations;  // ms, m_animBitmaps ile 1:1
+    int                       m_animFrameIdx = 0;
 };

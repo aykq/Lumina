@@ -120,18 +120,16 @@ HRESULT Renderer::CreateDeviceResources()
     m_renderTarget->CreateSolidColorBrush(
         D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.38f), &m_toggleFillBrush
     );
-    m_renderTarget->CreateSolidColorBrush(
-        D2D1::ColorF(0.90f, 0.18f, 0.18f, 1.0f), &m_markerBrush
-    );
-
     return S_OK;
 }
 
 void Renderer::DiscardDeviceResources()
 {
-    if (m_mapTileBitmap)    { m_mapTileBitmap->Release();    m_mapTileBitmap = nullptr; }
+    for (auto* bmp : m_animBitmaps) if (bmp) bmp->Release();
+    m_animBitmaps.clear();
+    m_animDurations.clear();
+    m_animFrameIdx = 0;
     if (m_bitmap)           { m_bitmap->Release();           m_bitmap = nullptr; }
-    if (m_markerBrush)      { m_markerBrush->Release();      m_markerBrush = nullptr; }
     if (m_toggleFillBrush)  { m_toggleFillBrush->Release();  m_toggleFillBrush = nullptr; }
     if (m_activeBrush)      { m_activeBrush->Release();      m_activeBrush = nullptr; }
     if (m_whiteBrush)       { m_whiteBrush->Release();       m_whiteBrush = nullptr; }
@@ -139,22 +137,53 @@ void Renderer::DiscardDeviceResources()
     if (m_renderTarget)     { m_renderTarget->Release();     m_renderTarget = nullptr; }
 }
 
-void Renderer::LoadMapTile(const uint8_t* pixels, UINT w, UINT h, float markerX, float markerY)
+
+void Renderer::LoadAnimationFrames(const std::vector<AnimFrame>& frames)
 {
-    if (m_mapTileBitmap) { m_mapTileBitmap->Release(); m_mapTileBitmap = nullptr; }
+    ClearAnimation();
+    if (frames.empty()) return;
     if (FAILED(CreateDeviceResources()) || !m_renderTarget) return;
 
     D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
     );
-    m_renderTarget->CreateBitmap(D2D1::SizeU(w, h), pixels, w * 4, props, &m_mapTileBitmap);
-    m_mapMarkerX = markerX;
-    m_mapMarkerY = markerY;
+
+    for (const auto& f : frames)
+    {
+        ID2D1Bitmap* bmp = nullptr;
+        HRESULT hr = m_renderTarget->CreateBitmap(
+            D2D1::SizeU(f.width, f.height),
+            f.pixels.data(), f.width * 4, props, &bmp);
+        if (SUCCEEDED(hr) && bmp)
+        {
+            m_animBitmaps.push_back(bmp);
+            m_animDurations.push_back(f.durationMs);
+        }
+    }
+
+    if (m_animBitmaps.empty()) return;
+    m_animFrameIdx = 0;
 }
 
-void Renderer::ClearMapTile()
+void Renderer::ClearAnimation()
 {
-    if (m_mapTileBitmap) { m_mapTileBitmap->Release(); m_mapTileBitmap = nullptr; }
+    for (auto* bmp : m_animBitmaps) if (bmp) bmp->Release();
+    m_animBitmaps.clear();
+    m_animDurations.clear();
+    m_animFrameIdx = 0;
+}
+
+int Renderer::AdvanceFrame()
+{
+    if (m_animBitmaps.empty()) return 100;
+    m_animFrameIdx = (m_animFrameIdx + 1) % static_cast<int>(m_animBitmaps.size());
+    return m_animDurations[m_animFrameIdx];
+}
+
+int Renderer::GetCurrentFrameDuration() const
+{
+    if (m_animDurations.empty()) return 100;
+    return m_animDurations[m_animFrameIdx];
 }
 
 bool Renderer::LoadImageFromPixels(const uint8_t* pixels, UINT width, UINT height,
@@ -545,71 +574,8 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
             }
             y += kRowH;
 
-            // ── Harita önizlemesi ─────────────────────────────────────────────
-            if (m_mapTileBitmap && m_markerBrush)
-            {
-                constexpr float kMapH = 160.0f;
-                float mapW = x1 - x0;
-                float mapY = y;
-
-                D2D1_SIZE_F tileSize = m_mapTileBitmap->GetSize();
-
-                // Tile'ı yatayda panel genişliğine ölçekle (kare tile için eşit scale)
-                float scale    = mapW / tileSize.width;
-                float scaledTH = tileSize.height * scale;
-
-                // Marker'ı dikey olarak kMapH ortasına hizala
-                float markerScaledY = m_mapMarkerY * scaledTH;
-                float destY = mapY + kMapH * 0.5f - markerScaledY;
-
-                // Tile alanı aşmasın
-                if (scaledTH > kMapH)
-                {
-                    float minDestY = mapY + kMapH - scaledTH;
-                    float maxDestY = mapY;
-                    if (destY < minDestY) destY = minDestY;
-                    if (destY > maxDestY) destY = maxDestY;
-                }
-                else
-                {
-                    destY = mapY + (kMapH - scaledTH) * 0.5f;
-                }
-
-                D2D1_RECT_F clipRect = D2D1::RectF(x0, mapY, x0 + mapW, mapY + kMapH);
-                m_renderTarget->PushAxisAlignedClip(clipRect, D2D1_ANTIALIAS_MODE_ALIASED);
-
-                // Tile çiz
-                m_renderTarget->DrawBitmap(
-                    m_mapTileBitmap,
-                    D2D1::RectF(x0, destY, x0 + mapW, destY + scaledTH)
-                );
-
-                // Marker pin — gerçek konum
-                float markerPx = x0 + m_mapMarkerX * mapW;
-                float markerPy = destY + m_mapMarkerY * scaledTH;
-
-                // Outer white circle (r=8)
-                m_whiteBrush->SetOpacity(1.0f);
-                m_renderTarget->FillEllipse(
-                    D2D1::Ellipse(D2D1::Point2F(markerPx, markerPy), 8.0f, 8.0f),
-                    m_whiteBrush
-                );
-                // Inner red circle (r=5)
-                m_renderTarget->FillEllipse(
-                    D2D1::Ellipse(D2D1::Point2F(markerPx, markerPy), 5.0f, 5.0f),
-                    m_markerBrush
-                );
-
-                m_renderTarget->PopAxisAlignedClip();
-
-                // Harita kenarlığı
-                m_whiteBrush->SetOpacity(0.25f);
-                m_renderTarget->DrawRectangle(clipRect, m_whiteBrush, 1.0f);
-                m_whiteBrush->SetOpacity(1.0f);
-
-                y += kMapH + 6.0f;
-            }
-
+            // Konum adı (Nominatim reverse geocoding)
+            DrawRow(L"Location", info->gpsLocationName);
             DrawRow(L"Altitude", info->gpsAltitude);
         }
     }
@@ -652,7 +618,9 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
     if (FAILED(CreateDeviceResources())) return;
 
     // D2DERR_RECREATE_TARGET sonrası bitmap kaybolmuşsa yeniden yükle
-    if (!m_bitmap && !m_imagePath.empty())
+    if (!m_bitmap && !m_animBitmaps.empty() && !m_imagePath.empty())
+        LoadImage(m_imagePath);  // animasyon için fallback (nadiren gerekir)
+    else if (!m_bitmap && m_animBitmaps.empty() && !m_imagePath.empty())
         LoadImage(m_imagePath);
 
     m_renderTarget->BeginDraw();
@@ -660,8 +628,15 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
     // Arka plan: koyu gri (#1E1E1E)
     m_renderTarget->Clear(D2D1::ColorF(0.118f, 0.118f, 0.118f));
 
+    // Aktif bitmap: animasyonsa mevcut frame, değilse statik bitmap
+    ID2D1Bitmap* activeBitmap = nullptr;
+    if (!m_animBitmaps.empty() && m_animFrameIdx < static_cast<int>(m_animBitmaps.size()))
+        activeBitmap = m_animBitmaps[m_animFrameIdx];
+    else
+        activeBitmap = m_bitmap;
+
     // Bitmap yoksa ve decode hatası varsa hata mesajı göster
-    if (!m_bitmap && info && !info->errorMessage.empty() &&
+    if (!activeBitmap && info && !info->errorMessage.empty() &&
         m_textFormat && m_whiteBrush)
     {
         D2D1_SIZE_F sz = m_renderTarget->GetSize();
@@ -674,10 +649,10 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
         );
     }
 
-    if (m_bitmap)
+    if (activeBitmap)
     {
         D2D1_SIZE_F wndSize = m_renderTarget->GetSize();
-        D2D1_SIZE_F imgSize = m_bitmap->GetSize();
+        D2D1_SIZE_F imgSize = activeBitmap->GetSize();
 
         float availW = wndSize.width - vs.panelAnimWidth;
         float fitScale   = min(availW / imgSize.width, wndSize.height / imgSize.height);
@@ -689,7 +664,7 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
         float destY = (wndSize.height - destH) * 0.5f + vs.panY;
 
         m_renderTarget->DrawBitmap(
-            m_bitmap,
+            activeBitmap,
             D2D1::RectF(destX, destY, destX + destW, destY + destH)
         );
     }

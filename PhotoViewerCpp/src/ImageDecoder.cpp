@@ -10,9 +10,13 @@
 
 // vcpkg bundled decoders
 #include <webp/decode.h>
+#include <webp/demux.h>   // WebPAnimDecoder (animated WebP)
 #include <libheif/heif.h>
 #include <jxl/decode.h>
+#include <jxl/codestream_header.h>
 #include <avif/avif.h>
+
+#pragma comment(lib, "libwebpdemux.lib")
 
 // ─── Dosya okuma yardımcısı ───────────────────────────────────────────────────
 
@@ -638,18 +642,64 @@ static bool DecodeWebP(const std::wstring& path, DecodeOutput& out)
     auto data = ReadFileBytes(path);
     if (data.empty()) return false;
 
-    int w = 0, h = 0;
-    // WebPDecodeBGRA: BGRA düz alfa döner
-    uint8_t* decoded = WebPDecodeBGRA(data.data(), data.size(), &w, &h);
-    if (!decoded) return false;
+    // Frame sayısını hızlıca kontrol et
+    WebPData webpData = { data.data(), data.size() };
+    WebPAnimDecoderOptions opts;
+    WebPAnimDecoderOptionsInit(&opts);
+    opts.color_mode = MODE_BGRA;
 
-    out.width  = static_cast<UINT>(w);
-    out.height = static_cast<UINT>(h);
-    out.pixels.assign(decoded, decoded + static_cast<size_t>(w) * h * 4);
-    WebPFree(decoded);
+    WebPAnimDecoder* dec = WebPAnimDecoderNew(&webpData, &opts);
+    if (!dec) return false;
 
-    PremultiplyBGRA(out.pixels.data(), out.width, out.height);
-    return true;
+    WebPAnimInfo info;
+    if (!WebPAnimDecoderGetInfo(dec, &info))
+    {
+        WebPAnimDecoderDelete(dec);
+        return false;
+    }
+
+    if (info.frame_count <= 1)
+    {
+        // Statik WebP: hızlı yol
+        WebPAnimDecoderDelete(dec);
+        int w = 0, h = 0;
+        uint8_t* decoded = WebPDecodeBGRA(data.data(), data.size(), &w, &h);
+        if (!decoded) return false;
+        out.width  = static_cast<UINT>(w);
+        out.height = static_cast<UINT>(h);
+        out.pixels.assign(decoded, decoded + static_cast<size_t>(w) * h * 4);
+        WebPFree(decoded);
+        PremultiplyBGRA(out.pixels.data(), out.width, out.height);
+        return true;
+    }
+
+    // Animated WebP: tüm frame'leri decode et
+    int prevTimestamp = 0;
+    while (WebPAnimDecoderHasMoreFrames(dec))
+    {
+        uint8_t* buf = nullptr;
+        int timestamp = 0;
+        if (!WebPAnimDecoderGetNext(dec, &buf, &timestamp)) break;
+
+        AnimFrame frame;
+        frame.width      = info.canvas_width;
+        frame.height     = info.canvas_height;
+        frame.durationMs = timestamp - prevTimestamp;
+        if (frame.durationMs <= 0) frame.durationMs = 100;
+        prevTimestamp    = timestamp;
+
+        const size_t sz = static_cast<size_t>(info.canvas_width) * info.canvas_height * 4;
+        frame.pixels.assign(buf, buf + sz);  // buf BGRA
+        PremultiplyBGRA(frame.pixels.data(), frame.width, frame.height);
+        out.frames.push_back(std::move(frame));
+    }
+
+    WebPAnimDecoderDelete(dec);
+
+    out.width  = info.canvas_width;
+    out.height = info.canvas_height;
+    out.format = L"WebP";
+    return !out.frames.empty();
 }
 
 // ─── HEIF/HEIC decoder (libheif) ─────────────────────────────────────────────
@@ -746,13 +796,17 @@ static bool DecodeJXL(const std::wstring& path, DecodeOutput& out)
     if (!dec) return false;
 
     JxlDecoderSubscribeEvents(dec,
-        JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE);
+        JXL_DEC_BASIC_INFO | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE);
     JxlDecoderSetInput(dec, data.data(), data.size());
     JxlDecoderCloseInput(dec);
 
-    JxlBasicInfo   info{};
+    JxlBasicInfo   basicInfo{};
     JxlPixelFormat fmt = { 4, JXL_TYPE_UINT8, JXL_LITTLE_ENDIAN, 0 };  // RGBA
-    bool success = false;
+
+    bool isAnimated      = false;
+    bool success         = false;
+    int  currentDurMs    = 100;
+    std::vector<uint8_t> frameBuf;
 
     for (;;)
     {
@@ -760,24 +814,70 @@ static bool DecodeJXL(const std::wstring& path, DecodeOutput& out)
 
         if (status == JXL_DEC_BASIC_INFO)
         {
-            if (JxlDecoderGetBasicInfo(dec, &info) != JXL_DEC_SUCCESS) break;
+            if (JxlDecoderGetBasicInfo(dec, &basicInfo) != JXL_DEC_SUCCESS) break;
+            isAnimated = (basicInfo.have_animation == JXL_TRUE
+                          && basicInfo.animation.tps_numerator > 0);
+        }
+        else if (status == JXL_DEC_FRAME)
+        {
+            if (isAnimated)
+            {
+                JxlFrameHeader fh{};
+                if (JxlDecoderGetFrameHeader(dec, &fh) == JXL_DEC_SUCCESS && fh.duration > 0)
+                {
+                    currentDurMs = static_cast<int>(
+                        1000.0 * fh.duration
+                        * basicInfo.animation.tps_denominator
+                        / basicInfo.animation.tps_numerator);
+                    if (currentDurMs <= 0) currentDurMs = 100;
+                }
+                else
+                {
+                    currentDurMs = 100;
+                }
+            }
         }
         else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER)
         {
             size_t bufSize = 0;
             if (JxlDecoderImageOutBufferSize(dec, &fmt, &bufSize) != JXL_DEC_SUCCESS) break;
-            out.pixels.resize(bufSize);
-            if (JxlDecoderSetImageOutBuffer(dec, &fmt, out.pixels.data(), bufSize)
+            frameBuf.resize(bufSize);
+            if (JxlDecoderSetImageOutBuffer(dec, &fmt, frameBuf.data(), bufSize)
                 != JXL_DEC_SUCCESS) break;
         }
         else if (status == JXL_DEC_FULL_IMAGE)
         {
-            out.width  = info.xsize;
-            out.height = info.ysize;
-            success    = true;
+            if (isAnimated)
+            {
+                AnimFrame frame;
+                frame.width      = basicInfo.xsize;
+                frame.height     = basicInfo.ysize;
+                frame.durationMs = currentDurMs;
+                frame.pixels     = frameBuf;  // copy — frameBuf reused for next frame
+                SwapRB(frame.pixels.data(), frame.width, frame.height);
+                PremultiplyBGRA(frame.pixels.data(), frame.width, frame.height);
+                out.frames.push_back(std::move(frame));
+            }
+            else
+            {
+                out.width  = basicInfo.xsize;
+                out.height = basicInfo.ysize;
+                out.pixels = std::move(frameBuf);
+                success    = true;
+                break;
+            }
+        }
+        else if (status == JXL_DEC_SUCCESS)
+        {
+            if (isAnimated && !out.frames.empty())
+            {
+                out.width  = basicInfo.xsize;
+                out.height = basicInfo.ysize;
+                success    = true;
+            }
             break;
         }
-        else if (status == JXL_DEC_SUCCESS || status == JXL_DEC_ERROR)
+        else if (status == JXL_DEC_ERROR)
         {
             break;
         }
@@ -785,15 +885,43 @@ static bool DecodeJXL(const std::wstring& path, DecodeOutput& out)
 
     JxlDecoderDestroy(dec);
 
-    if (!success || out.pixels.empty()) { out.pixels.clear(); return false; }
+    if (!success) { out.pixels.clear(); out.frames.clear(); return false; }
 
-    // libjxl RGBA döner — Direct2D için BGRA'ya çevir, sonra pre-multiply
-    SwapRB(out.pixels.data(), out.width, out.height);
-    PremultiplyBGRA(out.pixels.data(), out.width, out.height);
+    if (!isAnimated)
+    {
+        // Statik JXL: RGBA → BGRA + pre-multiply
+        SwapRB(out.pixels.data(), out.width, out.height);
+        PremultiplyBGRA(out.pixels.data(), out.width, out.height);
+    }
     return true;
 }
 
 // ─── AVIF decoder (libavif) ───────────────────────────────────────────────────
+
+// Yardımcı: avifImage BGRA dönüşümü + DecodeOutput veya AnimFrame'e yaz
+static bool AvifFrameToPixels(avifDecoder* decoder, std::vector<uint8_t>& outPixels,
+                               UINT& outW, UINT& outH)
+{
+    avifImage* img = decoder->image;
+    avifRGBImage rgb{};
+    avifRGBImageSetDefaults(&rgb, img);
+    rgb.format = AVIF_RGB_FORMAT_BGRA;
+    avifRGBImageAllocatePixels(&rgb);
+
+    bool ok = (avifImageYUVToRGB(img, &rgb) == AVIF_RESULT_OK);
+    if (ok)
+    {
+        outW = rgb.width;
+        outH = rgb.height;
+        outPixels.resize(static_cast<size_t>(outW) * outH * 4);
+        for (UINT row = 0; row < outH; row++)
+            memcpy(outPixels.data() + static_cast<size_t>(row) * outW * 4,
+                   rgb.pixels       + static_cast<size_t>(row) * rgb.rowBytes,
+                   static_cast<size_t>(outW) * 4);
+    }
+    avifRGBImageFreePixels(&rgb);
+    return ok;
+}
 
 static bool DecodeAVIF(const std::wstring& path, DecodeOutput& out)
 {
@@ -803,196 +931,156 @@ static bool DecodeAVIF(const std::wstring& path, DecodeOutput& out)
     avifDecoder* decoder = avifDecoderCreate();
     if (!decoder) return false;
 
-    // libavif 1.x: avifDecoderReadMemory(decoder, image, data, size)
-    avifImage* image = avifImageCreateEmpty();
-    if (!image) { avifDecoderDestroy(decoder); return false; }
-
-    avifResult res = avifDecoderReadMemory(decoder, image, data.data(), data.size());
-    if (res != AVIF_RESULT_OK)
+    if (avifDecoderSetIOMemory(decoder, data.data(), data.size()) != AVIF_RESULT_OK
+        || avifDecoderParse(decoder) != AVIF_RESULT_OK)
     {
-        avifImageDestroy(image);
         avifDecoderDestroy(decoder);
         return false;
     }
 
-    // EXIF bloğu varsa parse et
-    if (image->exif.size > 0)
-        ParseRawExif(image->exif.data, image->exif.size, out);
+    // EXIF: parse'dan sonra decoder->image'da mevcut
+    if (decoder->image && decoder->image->exif.size > 0)
+        ParseRawExif(decoder->image->exif.data, decoder->image->exif.size, out);
 
-    avifRGBImage rgb{};
-    avifRGBImageSetDefaults(&rgb, image);
-    rgb.format = AVIF_RGB_FORMAT_BGRA;   // Direct2D uyumlu format
-    avifRGBImageAllocatePixels(&rgb);
-
-    res = avifImageYUVToRGB(image, &rgb);
-    bool success = (res == AVIF_RESULT_OK);
-
-    if (success)
+    if (decoder->imageCount > 1)
     {
-        out.width  = rgb.width;
-        out.height = rgb.height;
-        out.pixels.resize(static_cast<size_t>(out.width) * out.height * 4);
+        // Animated AVIF
+        while (avifDecoderNextImage(decoder) == AVIF_RESULT_OK)
+        {
+            AnimFrame frame;
+            if (!AvifFrameToPixels(decoder, frame.pixels, frame.width, frame.height))
+                continue;
 
-        // Stride farklıysa satır satır kopyala
-        for (UINT row = 0; row < out.height; row++)
-            memcpy(out.pixels.data() + static_cast<size_t>(row) * out.width * 4,
-                   rgb.pixels        + static_cast<size_t>(row) * rgb.rowBytes,
-                   static_cast<size_t>(out.width) * 4);
+            int durMs = static_cast<int>(decoder->imageTiming.duration * 1000.0);
+            if (durMs <= 0) durMs = 100;
+            frame.durationMs = durMs;
+
+            PremultiplyBGRA(frame.pixels.data(), frame.width, frame.height);
+            out.frames.push_back(std::move(frame));
+        }
+        out.width  = decoder->image ? decoder->image->width  : 0;
+        out.height = decoder->image ? decoder->image->height : 0;
+        out.format = L"AVIF";
+        avifDecoderDestroy(decoder);
+        return !out.frames.empty();
     }
+    else
+    {
+        // Statik AVIF
+        bool ok = (avifDecoderNextImage(decoder) == AVIF_RESULT_OK);
+        if (ok) ok = AvifFrameToPixels(decoder, out.pixels, out.width, out.height);
+        avifDecoderDestroy(decoder);
 
-    avifRGBImageFreePixels(&rgb);
-    avifImageDestroy(image);
-    avifDecoderDestroy(decoder);
-
-    if (!success || out.pixels.empty()) { out.pixels.clear(); return false; }
-
-    // libavif BGRA düz alfa döner — pre-multiply gerekli
-    PremultiplyBGRA(out.pixels.data(), out.width, out.height);
-    return true;
+        if (!ok) { out.pixels.clear(); return false; }
+        PremultiplyBGRA(out.pixels.data(), out.width, out.height);
+        return true;
+    }
 }
 
-// ─── OSM harita tile indirici ─────────────────────────────────────────────────
-// GPS ondalık koordinatlarından zoom 15 OSM tile'ını WinHTTP+WIC ile indirir.
-// Başarılıysa out.mapTilePixels dolu olur; hata durumunda sessizce döner.
+// ─── Nominatim reverse geocoding ─────────────────────────────────────────────
+// GPS koordinatlarından konum adını döndürür: "Şehir, İl, Ülke"
+// WinHTTP ile nominatim.openstreetmap.org/reverse API'sine istek atar.
 
-static void DownloadOsmTile(double lat, double lon, DecodeOutput& out)
+std::wstring FetchLocationName(double lat, double lon)
 {
-    constexpr int kZoom = 15;
-    constexpr double kPi = 3.14159265358979323846;
+    // /reverse?lat=X&lon=Y&format=json  →  JSON cevabından adres bilgisi çıkar
+    wchar_t reqPath[128];
+    swprintf_s(reqPath, L"/reverse?lat=%.6f&lon=%.6f&format=json", lat, lon);
 
-    // Tile koordinatlarını hesapla
-    const double n   = std::pow(2.0, kZoom);
-    const double xf  = (lon + 180.0) / 360.0 * n;
-    const double latR = lat * kPi / 180.0;
-    const double yf  = (1.0 - std::log(std::tan(latR) + 1.0 / std::cos(latR)) / kPi) / 2.0 * n;
-
-    const int tx = static_cast<int>(std::floor(xf));
-    const int ty = static_cast<int>(std::floor(yf));
-    out.mapMarkerX = static_cast<float>(xf - tx);
-    out.mapMarkerY = static_cast<float>(yf - ty);
-
-    // URL yolu: /{zoom}/{x}/{y}.png
-    wchar_t tilePath[64];
-    swprintf_s(tilePath, L"/%d/%d/%d.png", kZoom, tx, ty);
-
-    // ── WinHTTP ile tile indir ────────────────────────────────────────────────
     HINTERNET hSession = WinHttpOpen(L"PhotoViewer/1.0",
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return;
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return {};
 
     WinHttpSetTimeouts(hSession, 5000, 5000, 10000, 10000);
 
-    HINTERNET hConnect = WinHttpConnect(hSession,
-        L"tile.openstreetmap.org", INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return; }
+    HINTERNET hConn = WinHttpConnect(hSession,
+        L"nominatim.openstreetmap.org", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConn) { WinHttpCloseHandle(hSession); return {}; }
 
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", tilePath,
-        nullptr, WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!hRequest)
+    HINTERNET hReq = WinHttpOpenRequest(hConn, L"GET", reqPath,
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hReq)
     {
-        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hConn);
         WinHttpCloseHandle(hSession);
-        return;
+        return {};
     }
 
-    bool ok = WinHttpSendRequest(hRequest,
-        WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-        WINHTTP_NO_REQUEST_DATA, 0, 0, 0) != 0;
-    ok = ok && WinHttpReceiveResponse(hRequest, nullptr) != 0;
+    WinHttpAddRequestHeaders(hReq,
+        L"Accept: application/json\r\nAccept-Language: tr,en",
+        static_cast<DWORD>(-1L), WINHTTP_ADDREQ_FLAG_ADD);
 
-    std::vector<uint8_t> pngBytes;
+    bool ok = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0) != FALSE
+           && WinHttpReceiveResponse(hReq, nullptr) != FALSE;
+
+    std::string body;
     if (ok)
     {
-        for (;;)
+        DWORD avail = 0;
+        while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0)
         {
-            DWORD avail = 0;
-            if (!WinHttpQueryDataAvailable(hRequest, &avail) || avail == 0) break;
-            size_t prev = pngBytes.size();
-            pngBytes.resize(prev + avail);
+            std::vector<char> buf(avail);
             DWORD read = 0;
-            if (!WinHttpReadData(hRequest, pngBytes.data() + prev, avail, &read))
-            {
-                pngBytes.clear();
-                break;
-            }
-            pngBytes.resize(prev + read);
+            if (WinHttpReadData(hReq, buf.data(), avail, &read) && read > 0)
+                body.append(buf.data(), read);
         }
     }
 
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hReq);
+    WinHttpCloseHandle(hConn);
     WinHttpCloseHandle(hSession);
 
-    if (pngBytes.empty()) return;
+    if (body.empty()) return {};
 
-    // ── WIC ile PNG decode → BGRA pre-multiplied ─────────────────────────────
-    IWICImagingFactory* wic = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
-                                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))))
-        return;
-
-    // PNG byte'larını bellek stream'e sar
-    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, pngBytes.size());
-    if (!hg) { wic->Release(); return; }
-    void* mem = GlobalLock(hg);
-    memcpy(mem, pngBytes.data(), pngBytes.size());
-    GlobalUnlock(hg);
-
-    IStream* stream = nullptr;
-    if (FAILED(CreateStreamOnHGlobal(hg, TRUE, &stream)))
+    // Basit JSON alan çıkarıcı — "key":"value" formatını arar
+    auto extract = [&](const std::string& src, const char* key) -> std::string
     {
-        GlobalFree(hg);
-        wic->Release();
-        return;
-    }
+        std::string needle = "\"";
+        needle += key;
+        needle += "\":\"";
+        auto p = src.find(needle);
+        if (p == std::string::npos) return {};
+        p += needle.size();
+        auto e = src.find('"', p);
+        return e != std::string::npos ? src.substr(p, e - p) : std::string{};
+    };
 
-    IWICBitmapDecoder* decoder = nullptr;
-    HRESULT hr = wic->CreateDecoderFromStream(stream, nullptr,
-        WICDecodeMetadataCacheOnDemand, &decoder);
-    stream->Release();
-    if (FAILED(hr)) { wic->Release(); return; }
+    // "address":{...} bloğunu bul; yoksa tüm body'de ara
+    auto addrPos = body.find("\"address\":");
+    auto addrEnd = addrPos != std::string::npos ? body.find('}', addrPos) : std::string::npos;
+    std::string addr = (addrPos != std::string::npos && addrEnd != std::string::npos)
+                       ? body.substr(addrPos, addrEnd - addrPos + 1)
+                       : body;
 
-    IWICBitmapFrameDecode* frame = nullptr;
-    hr = decoder->GetFrame(0, &frame);
-    decoder->Release();
-    if (FAILED(hr)) { wic->Release(); return; }
+    // Şehir/kasaba/köy → il → ülke
+    std::string city = extract(addr, "city");
+    if (city.empty()) city = extract(addr, "town");
+    if (city.empty()) city = extract(addr, "village");
+    if (city.empty()) city = extract(addr, "municipality");
+    if (city.empty()) city = extract(addr, "county");
+    std::string state   = extract(addr, "state");
+    std::string country = extract(addr, "country");
 
-    IWICFormatConverter* converter = nullptr;
-    hr = wic->CreateFormatConverter(&converter);
-    if (SUCCEEDED(hr))
+    std::string result;
+    auto append = [&](const std::string& s)
     {
-        hr = converter->Initialize(frame, GUID_WICPixelFormat32bppPBGRA,
-            WICBitmapDitherTypeNone, nullptr, 0.0f, WICBitmapPaletteTypeMedianCut);
-    }
-    frame->Release();
+        if (s.empty()) return;
+        if (!result.empty()) result += ", ";
+        result += s;
+    };
+    append(city);
+    append(state);
+    append(country);
 
-    if (FAILED(hr))
-    {
-        if (converter) converter->Release();
-        wic->Release();
-        return;
-    }
+    if (result.empty()) return {};
 
-    UINT w = 0, h = 0;
-    converter->GetSize(&w, &h);
-    const UINT stride = w * 4;
-    out.mapTilePixels.resize(static_cast<size_t>(stride) * h);
-    hr = converter->CopyPixels(nullptr, stride,
-        static_cast<UINT>(out.mapTilePixels.size()), out.mapTilePixels.data());
-
-    converter->Release();
-    wic->Release();
-
-    if (FAILED(hr))
-    {
-        out.mapTilePixels.clear();
-        return;
-    }
-
-    out.mapTileWidth  = w;
-    out.mapTileHeight = h;
+    // UTF-8 → wide string
+    int len = MultiByteToWideChar(CP_UTF8, 0, result.c_str(), -1, nullptr, 0);
+    if (len <= 1) return {};
+    std::wstring wresult(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, result.c_str(), -1, wresult.data(), len);
+    return wresult;
 }
 
 // ─── Ana dispatch ─────────────────────────────────────────────────────────────
@@ -1023,9 +1111,9 @@ bool DecodeImage(const std::wstring& path, DecodeOutput& out)
     else
         ok = DecodeWithWIC(path, out);  // JPEG, PNG, BMP, GIF, TIFF, ICO
 
-    // GPS koordinatları varsa harita tile'ını arka planda indir
+    // GPS koordinatları varsa konum adını çek (Nominatim reverse geocoding)
     if (ok && out.hasGpsDecimal)
-        DownloadOsmTile(out.gpsLatDecimal, out.gpsLonDecimal, out);
+        out.gpsLocationName = FetchLocationName(out.gpsLatDecimal, out.gpsLonDecimal);
 
     return ok;
 }

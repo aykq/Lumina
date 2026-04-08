@@ -4,6 +4,15 @@
 #include <vector>
 #include <cstdint>
 
+// Animasyon frame'i — BGRA pre-multiplied pikseller + süre
+struct AnimFrame
+{
+    std::vector<uint8_t> pixels;  // BGRA pre-multiplied
+    UINT width      = 0;
+    UINT height     = 0;
+    int  durationMs = 100;        // frame gösterim süresi (ms)
+};
+
 // Decode sonucu: BGRA pre-multiplied pikseller + EXIF metadata
 struct DecodeOutput
 {
@@ -23,19 +32,21 @@ struct DecodeOutput
     std::wstring gpsLatitude;      // ör. L"40°26′47.12″N"
     std::wstring gpsLongitude;     // ör. L"79°58′30.45″W"
     std::wstring gpsAltitude;      // ör. L"123.4 m"
-    // GPS ondalık derece — harita linki için; hasGpsDecimal false ise geçersiz
+    // GPS ondalık derece; hasGpsDecimal false ise geçersiz
     bool         hasGpsDecimal  = false;
     double       gpsLatDecimal  = 0.0;  // N = pozitif, S = negatif
     double       gpsLonDecimal  = 0.0;  // E = pozitif, W = negatif
-    // OSM harita tile — GPS varsa ve indirme başarılıysa dolu; yoksa mapTilePixels boş
-    std::vector<uint8_t> mapTilePixels;  // BGRA pre-multiplied
-    UINT         mapTileWidth   = 0;
-    UINT         mapTileHeight  = 0;
-    float        mapMarkerX     = 0.5f;  // tile içindeki yatay konum (0..1)
-    float        mapMarkerY     = 0.5f;  // tile içindeki dikey konum (0..1)
+    // Nominatim reverse geocoding sonucu — ör. L"Merzifon, Amasya, Türkiye"
+    std::wstring gpsLocationName;
+    // Animasyon frame'leri — boş = statik görüntü (pixels kullanılır); dolu = animated
+    std::vector<AnimFrame> frames;
 };
 
 // Desteklenen tüm formatları 32bpp BGRA pre-multiplied piksellere decode eder.
 // EXIF yönelimi (Orientation tag) otomatik uygulanır.
 // Başarılıysa true döner ve out.pixels dolu olur.
 bool DecodeImage(const std::wstring& path, DecodeOutput& out);
+
+// Nominatim reverse geocoding: koordinatları konum adına çevirir.
+// Başarılıysa L"Şehir, İl, Ülke" formatında döner; hata durumunda boş wstring.
+std::wstring FetchLocationName(double latDecimal, double lonDecimal);

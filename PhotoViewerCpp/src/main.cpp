@@ -1,8 +1,10 @@
 #include <windows.h>
 #include <windowsx.h>   // GET_X_LPARAM, GET_Y_LPARAM
 #include <shellapi.h>   // CommandLineToArgvW
+#include <mmsystem.h>   // timeBeginPeriod / timeEndPeriod
+#pragma comment(lib, "winmm.lib")
 #include <string>
-#include <cmath>        // fabsf
+#include <cmath>        // fabsf, expf
 #include <thread>       // std::thread
 #include <atomic>       // std::atomic
 #include <vector>       // std::vector (DecodeResult piksel buffer'ı)
@@ -17,9 +19,20 @@ static constexpr UINT     WM_DECODE_DONE        = WM_APP + 1;
 static constexpr UINT_PTR kZoomIndicatorTimerID = 1;
 static constexpr UINT_PTR kPanelAnimTimerID     = 2;
 static constexpr UINT_PTR kAnimTimerID          = 3;
+static constexpr UINT_PTR kZoomAnimTimerID      = 4;
 
-// Panel animasyon: her frame'de kalan mesafenin bu oranı kadar hareket eder (ease-out lerp)
-static constexpr float    kPanelAnimLerp        = 0.35f;
+// Animasyon timer aralığı — 7ms ≈ 143fps (timeBeginPeriod(1) ile hassas çalışır)
+static constexpr UINT     kAnimIntervalMs       = 7;
+
+// Panel ve zoom animasyon hızı — üstel sönüm sabiti (saniye⁻¹).
+// lerp_per_frame = 1 - exp(-dt * speed); 60fps'de panel ≈ 0.33, zoom ≈ 0.25
+static constexpr float    kPanelAnimSpeed       = 25.0f;
+static constexpr float    kZoomAnimSpeed        = 30.0f;
+
+// QPC frekansı ve son-tick zamanları — delta-time hesabı için
+static LARGE_INTEGER      g_qpcFreq             = {};
+static LARGE_INTEGER      g_panelAnimLastTime   = {};
+static LARGE_INTEGER      g_zoomAnimLastTime    = {};
 
 // --- Arka plan decode ---
 
@@ -267,12 +280,20 @@ static void LoadSettings()
     g_viewState.panelAnimWidth = g_viewState.showInfoPanel ? PanelLayout::Width : 0.0f;
 }
 
-// --- Panel animasyon başlatıcısı ---
+// --- Animasyon başlatıcıları ---
 
 static void StartPanelAnim(HWND hwnd)
 {
+    QueryPerformanceCounter(&g_panelAnimLastTime);
     KillTimer(hwnd, kPanelAnimTimerID);
-    SetTimer(hwnd, kPanelAnimTimerID, 16, nullptr);
+    SetTimer(hwnd, kPanelAnimTimerID, kAnimIntervalMs, nullptr);
+}
+
+static void StartZoomAnim(HWND hwnd)
+{
+    QueryPerformanceCounter(&g_zoomAnimLastTime);
+    KillTimer(hwnd, kZoomAnimTimerID);
+    SetTimer(hwnd, kZoomAnimTimerID, kAnimIntervalMs, nullptr);
 }
 
 // --- Yardımcı: ViewState'in UI alanlarını koruyarak navigasyon ---
@@ -280,6 +301,7 @@ static void StartPanelAnim(HWND hwnd)
 static void NavigateTo(HWND hwnd, const std::wstring& path)
 {
     KillTimer(hwnd, kAnimTimerID);
+    KillTimer(hwnd, kZoomAnimTimerID);
     if (g_renderer) g_renderer->ClearAnimation();
     UpdateWindowTitle(hwnd, path);
     bool  keepPanel     = g_viewState.showInfoPanel;
@@ -300,6 +322,9 @@ static void NavigateTo(HWND hwnd, const std::wstring& path)
 
 // --- Zoom yardımcısı ---
 
+// Yeni zoom hedefini (target) hesaplar; animasyon timer smoothly yaklaşır.
+// Temel olarak mevcut *animasyonlu* pozisyon (zoomFactor/panX/panY) kullanılır —
+// böylece hızlı scroll'da her tick önceki animasyonun üstüne biner.
 static void ApplyZoom(HWND hwnd, float cx, float cy, float newZoom)
 {
     constexpr float kMinZoom  = 0.1f;
@@ -315,11 +340,14 @@ static void ApplyZoom(HWND hwnd, float cx, float cy, float newZoom)
     float availW = (rc.right - rc.left) - g_viewState.panelAnimWidth;
     float halfW = availW * 0.5f;
     float halfH = (rc.bottom - rc.top)  * 0.5f;
-    float ratio = newZoom / g_viewState.zoomFactor;
 
-    g_viewState.panX       = (cx - halfW) - (cx - halfW - g_viewState.panX) * ratio;
-    g_viewState.panY       = (cy - halfH) - (cy - halfH - g_viewState.panY) * ratio;
-    g_viewState.zoomFactor = newZoom;
+    // Hedef pozisyonu temel al — hızlı scroll'da doğru birikim için
+    float ratio = newZoom / g_viewState.zoomTarget;
+    g_viewState.panXTarget = (cx - halfW) - (cx - halfW - g_viewState.panXTarget) * ratio;
+    g_viewState.panYTarget = (cy - halfH) - (cy - halfH - g_viewState.panYTarget) * ratio;
+    g_viewState.zoomTarget = newZoom;
+
+    StartZoomAnim(hwnd);
 }
 
 static void ShowZoomIndicator(HWND hwnd)
@@ -365,7 +393,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         float cx = static_cast<float>(cursor.x);
         float cy = static_cast<float>(cursor.y);
-        float newZoom = g_viewState.zoomFactor * (delta > 0 ? 1.1f : (1.0f / 1.1f));
+        // zoomTarget baz alınır — hızlı scroll'da her tick önceki hedef üstüne biner
+        float newZoom = g_viewState.zoomTarget * (delta > 0 ? 1.15f : (1.0f / 1.15f));
         ApplyZoom(hwnd, cx, cy, newZoom);
         ShowZoomIndicator(hwnd);
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -529,24 +558,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 return 0;
         }
 
-        if (g_viewState.zoomFactor == 1.0f)
+        if (fabsf(g_viewState.zoomFactor - 1.0f) < 0.02f &&
+            fabsf(g_viewState.zoomTarget - 1.0f) < 0.02f)
         {
             ApplyZoom(hwnd, cx, cy, 2.5f);
         }
         else
         {
-            // Zoom/pan sıfırla, ama UI durumunu koru
-            bool  keepPanel     = g_viewState.showInfoPanel;
-            float keepAnimWidth = g_viewState.panelAnimWidth;
-            bool  keep12h       = g_viewState.use12HourTime;
-            int   keepIdx       = g_viewState.imageIndex;
-            int   keepTotal     = g_viewState.imageTotal;
-            g_viewState = ViewState{};
-            g_viewState.showInfoPanel  = keepPanel;
-            g_viewState.panelAnimWidth = keepAnimWidth;
-            g_viewState.use12HourTime  = keep12h;
-            g_viewState.imageIndex     = keepIdx;
-            g_viewState.imageTotal     = keepTotal;
+            // Zoom/pan sıfırla — animasyonlu olarak fit-to-window'a dön
+            g_viewState.zoomTarget = 1.0f;
+            g_viewState.panXTarget = 0.0f;
+            g_viewState.panYTarget = 0.0f;
+            StartZoomAnim(hwnd);
         }
 
         ShowZoomIndicator(hwnd);
@@ -615,16 +638,55 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         else if (wParam == kPanelAnimTimerID)
         {
+            // Delta-time hesabı (saniye cinsinden) — frame hızından bağımsız animasyon
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            float dt = static_cast<float>(now.QuadPart - g_panelAnimLastTime.QuadPart)
+                       / static_cast<float>(g_qpcFreq.QuadPart);
+            g_panelAnimLastTime = now;
+            dt = min(dt, 0.1f);  // Uygulama duraksamalarında animasyonun sıçramasını önle
+
+            float lerp   = 1.0f - expf(-dt * kPanelAnimSpeed);
             float target = g_viewState.showInfoPanel ? PanelLayout::Width : 0.0f;
             float diff   = target - g_viewState.panelAnimWidth;
-            if (fabsf(diff) < 1.0f)
+            if (fabsf(diff) < 0.5f)
             {
                 g_viewState.panelAnimWidth = target;
                 KillTimer(hwnd, kPanelAnimTimerID);
             }
             else
             {
-                g_viewState.panelAnimWidth += diff * kPanelAnimLerp;
+                g_viewState.panelAnimWidth += diff * lerp;
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        else if (wParam == kZoomAnimTimerID)
+        {
+            // Delta-time tabanlı zoom lerp
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            float dt = static_cast<float>(now.QuadPart - g_zoomAnimLastTime.QuadPart)
+                       / static_cast<float>(g_qpcFreq.QuadPart);
+            g_zoomAnimLastTime = now;
+            dt = min(dt, 0.1f);
+
+            float lerp     = 1.0f - expf(-dt * kZoomAnimSpeed);
+            float zoomDiff = g_viewState.zoomTarget - g_viewState.zoomFactor;
+            float panXDiff = g_viewState.panXTarget - g_viewState.panX;
+            float panYDiff = g_viewState.panYTarget - g_viewState.panY;
+
+            if (fabsf(zoomDiff) < 0.0005f && fabsf(panXDiff) < 0.3f && fabsf(panYDiff) < 0.3f)
+            {
+                g_viewState.zoomFactor = g_viewState.zoomTarget;
+                g_viewState.panX       = g_viewState.panXTarget;
+                g_viewState.panY       = g_viewState.panYTarget;
+                KillTimer(hwnd, kZoomAnimTimerID);
+            }
+            else
+            {
+                g_viewState.zoomFactor += zoomDiff * lerp;
+                g_viewState.panX       += panXDiff * lerp;
+                g_viewState.panY       += panYDiff * lerp;
             }
             InvalidateRect(hwnd, nullptr, FALSE);
         }
@@ -685,6 +747,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         KillTimer(hwnd, kZoomIndicatorTimerID);
         KillTimer(hwnd, kPanelAnimTimerID);
         KillTimer(hwnd, kAnimTimerID);
+        KillTimer(hwnd, kZoomAnimTimerID);
+        timeEndPeriod(1);
         delete g_navigator; g_navigator = nullptr;
         delete g_renderer;  g_renderer  = nullptr;
         PostQuitMessage(0);
@@ -703,6 +767,10 @@ int WINAPI WinMain(
     _In_     int nCmdShow)
 {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    // Yüksek çözünürlüklü timer — 7ms animasyon intervalinin doğru çalışması için
+    timeBeginPeriod(1);
+    QueryPerformanceFrequency(&g_qpcFreq);
 
     LoadSettings();
 

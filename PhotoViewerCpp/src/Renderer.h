@@ -71,6 +71,10 @@ struct ViewState
     float zoomFactor        = 1.0f;   // 1.0 = fit-to-window, >1 = yakın, <1 = uzak
     float panX              = 0.0f;   // Piksel cinsinden yatay kaydırma
     float panY              = 0.0f;   // Piksel cinsinden dikey kaydırma
+    // Smooth zoom animasyonu hedefleri — timer her frame'de bunlara lerp eder
+    float zoomTarget        = 1.0f;
+    float panXTarget        = 0.0f;
+    float panYTarget        = 0.0f;
     bool  showZoomIndicator = false;  // Zoom overlay gösterilsin mi?
     bool  showInfoPanel     = false;  // I tuşuyla toggle — navigasyonda sıfırlanmaz
     float panelAnimWidth    = 0.0f;   // Animasyonlu panel genişliği (0.0–PanelLayout::Width)

@@ -263,7 +263,7 @@ void Renderer::DrawNavArrows(const ViewState& vs)
                     kSqMargin + kSqSize,   midY + kSqSize * 0.5f),
         kSqRadius, kSqRadius
     };
-    m_renderTarget->FillRoundedRectangle(leftRR, m_overlayBrush);
+    m_renderTarget->FillRoundedRectangle(leftRR, m_panelBgBrush);
     m_renderTarget->DrawText(L"\u2039", 1, m_textFormat, leftRR.rect, m_whiteBrush);
 
     // Sağ ok
@@ -272,7 +272,7 @@ void Renderer::DrawNavArrows(const ViewState& vs)
                     availW - kSqMargin,            midY + kSqSize * 0.5f),
         kSqRadius, kSqRadius
     };
-    m_renderTarget->FillRoundedRectangle(rightRR, m_overlayBrush);
+    m_renderTarget->FillRoundedRectangle(rightRR, m_panelBgBrush);
     m_renderTarget->DrawText(L"\u203A", 1, m_textFormat, rightRR.rect, m_whiteBrush);
 }
 

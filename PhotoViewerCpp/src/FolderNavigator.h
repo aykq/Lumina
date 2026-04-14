@@ -81,6 +81,23 @@ public:
     int  total() const { return static_cast<int>(m_files.size()); }
     int  index() const { return m_index; }
 
+    // İndeksi değiştirmeden sonraki/önceki dosya yolunu döner (prefetch için)
+    const std::wstring& peek_next() const
+    {
+        static const std::wstring kEmpty;
+        if (m_files.empty()) return kEmpty;
+        int idx = (m_index + 1) % static_cast<int>(m_files.size());
+        return m_files[idx];
+    }
+
+    const std::wstring& peek_prev() const
+    {
+        static const std::wstring kEmpty;
+        if (m_files.empty()) return kEmpty;
+        int idx = (m_index - 1 + static_cast<int>(m_files.size())) % static_cast<int>(m_files.size());
+        return m_files[idx];
+    }
+
     // Geçerli dosyanın tam yolunu döner
     const std::wstring& current() const
     {

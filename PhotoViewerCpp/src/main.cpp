@@ -4,10 +4,12 @@
 #include <mmsystem.h>   // timeBeginPeriod / timeEndPeriod
 #pragma comment(lib, "winmm.lib")
 #include <string>
-#include <cmath>        // fabsf, expf
-#include <thread>       // std::thread
-#include <atomic>       // std::atomic
-#include <vector>       // std::vector (DecodeResult piksel buffer'ı)
+#include <cmath>           // fabsf, expf
+#include <thread>          // std::thread
+#include <atomic>          // std::atomic
+#include <vector>          // std::vector (DecodeResult piksel buffer'ı)
+#include <unordered_map>   // Prefetch cache
+#include <mutex>           // std::mutex
 #include <cstdint>
 #include "Renderer.h"
 #include "FolderNavigator.h"
@@ -51,6 +53,67 @@ struct DecodeResult
 static std::atomic<uint64_t> g_decodeGeneration{0};
 static std::thread            g_decodeThread;
 
+// --- Prefetch cache ---
+
+static std::mutex                                       g_cacheMutex;
+static std::unordered_map<std::wstring, DecodeResult*> g_decodeCache;
+static constexpr size_t                                kCacheMaxSize = 4;
+static std::atomic<uint64_t>                           g_prefetchCancel{0};
+
+// --- Decode yardımcıları ---
+
+// Ortak decode mantığı — hem ana decode hem prefetch tarafından kullanılır.
+// COM zaten başlatılmış olmalı. result->path önceden doldurulmuş olmalı.
+static void DoDecodeToResult(DecodeResult* result)
+{
+    const std::wstring& path = result->path;
+
+    // Dosya adı
+    auto sep = path.rfind(L'\\');
+    if (sep == std::wstring::npos) sep = path.rfind(L'/');
+    result->info.filename = (sep != std::wstring::npos) ? path.substr(sep + 1) : path;
+
+    // Dosya boyutu
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+        result->info.fileSizeBytes =
+            (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+
+    // Decode (tüm format desteği ImageDecoder'da)
+    DecodeOutput decoded;
+    bool decodeOk   = DecodeImage(path, decoded);
+    bool hasContent = decodeOk && (!decoded.pixels.empty() || !decoded.frames.empty());
+
+    if (hasContent)
+    {
+        result->pixels            = std::move(decoded.pixels);
+        result->frames            = std::move(decoded.frames);
+        result->width             = decoded.width;
+        result->height            = decoded.height;
+        result->info.width        = static_cast<int>(decoded.width);
+        result->info.height       = static_cast<int>(decoded.height);
+        result->info.format       = decoded.format;
+        result->info.dateTaken    = decoded.dateTaken;
+        result->info.cameraMake   = decoded.cameraMake;
+        result->info.cameraModel  = decoded.cameraModel;
+        result->info.aperture     = decoded.aperture;
+        result->info.shutterSpeed = decoded.shutterSpeed;
+        result->info.iso          = decoded.iso;
+        result->info.gpsLatitude     = decoded.gpsLatitude;
+        result->info.gpsLongitude    = decoded.gpsLongitude;
+        result->info.gpsAltitude     = decoded.gpsAltitude;
+        result->info.hasGpsDecimal   = decoded.hasGpsDecimal;
+        result->info.gpsLatDecimal   = decoded.gpsLatDecimal;
+        result->info.gpsLonDecimal   = decoded.gpsLonDecimal;
+        result->info.gpsLocationName = decoded.gpsLocationName;
+        result->info.iccProfileName  = decoded.iccProfileName;
+    }
+    else
+    {
+        result->info.errorMessage = L"Bu dosya açılamıyor";
+    }
+}
+
 static void StartDecode(HWND hwnd, const std::wstring& path)
 {
     uint64_t gen = ++g_decodeGeneration;
@@ -66,57 +129,68 @@ static void StartDecode(HWND hwnd, const std::wstring& path)
         result->path       = path;
         result->generation = gen;
 
-        // ── Dosya adı (her zaman doldur — hata durumunda da gösterilir) ──────
-        auto sep = path.rfind(L'\\');
-        if (sep == std::wstring::npos) sep = path.rfind(L'/');
-        result->info.filename = (sep != std::wstring::npos) ? path.substr(sep + 1) : path;
-
-        // ── Dosya boyutu ─────────────────────────────────────────────────────
-        WIN32_FILE_ATTRIBUTE_DATA fad{};
-        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
-            result->info.fileSizeBytes =
-                (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
-
-        // ── Decode (tüm format desteği ImageDecoder'da) ──────────────────────
-        DecodeOutput decoded;
-        bool decodeOk = DecodeImage(path, decoded);
-        bool hasContent = decodeOk && (!decoded.pixels.empty() || !decoded.frames.empty());
-
-        if (hasContent)
-        {
-            result->pixels            = std::move(decoded.pixels);
-            result->frames            = std::move(decoded.frames);
-            result->width             = decoded.width;
-            result->height            = decoded.height;
-            result->info.width        = static_cast<int>(decoded.width);
-            result->info.height       = static_cast<int>(decoded.height);
-            result->info.format       = decoded.format;
-            result->info.dateTaken    = decoded.dateTaken;
-            result->info.cameraMake   = decoded.cameraMake;
-            result->info.cameraModel  = decoded.cameraModel;
-            result->info.aperture     = decoded.aperture;
-            result->info.shutterSpeed = decoded.shutterSpeed;
-            result->info.iso          = decoded.iso;
-            result->info.gpsLatitude     = decoded.gpsLatitude;
-            result->info.gpsLongitude    = decoded.gpsLongitude;
-            result->info.gpsAltitude     = decoded.gpsAltitude;
-            result->info.hasGpsDecimal   = decoded.hasGpsDecimal;
-            result->info.gpsLatDecimal   = decoded.gpsLatDecimal;
-            result->info.gpsLonDecimal   = decoded.gpsLonDecimal;
-            result->info.gpsLocationName = decoded.gpsLocationName;
-            result->info.iccProfileName  = decoded.iccProfileName;
-        }
-        else
-        {
-            result->info.errorMessage = L"Bu dosya açılamıyor";
-        }
+        DoDecodeToResult(result);
 
         CoUninitialize();
         PostMessage(hwnd, WM_DECODE_DONE, 0, reinterpret_cast<LPARAM>(result));
     });
 }
 
+// Prefetch: arka planda decode edip cache'e ekler, mesaj göndermez.
+static void StartPrefetch(const std::wstring& path, uint64_t cancelToken)
+{
+    if (path.empty()) return;
+
+    // Zaten cache'de var mı?
+    {
+        std::lock_guard<std::mutex> lock(g_cacheMutex);
+        if (g_decodeCache.count(path)) return;
+    }
+
+    std::thread([path, cancelToken]()
+    {
+        if (g_prefetchCancel.load() != cancelToken) return;
+
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        auto* result = new DecodeResult();
+        result->path = path;
+
+        DoDecodeToResult(result);
+
+        CoUninitialize();
+
+        // İptal edildi mi?
+        if (g_prefetchCancel.load() != cancelToken)
+        {
+            delete result;
+            return;
+        }
+
+        // Cache'e ekle
+        {
+            std::lock_guard<std::mutex> lock(g_cacheMutex);
+            // Cache doluysa en eski girdiyi at
+            if (g_decodeCache.size() >= kCacheMaxSize)
+            {
+                auto it = g_decodeCache.begin();
+                delete it->second;
+                g_decodeCache.erase(it);
+            }
+            // Race: aynı path başka bir thread tarafından eklendi mi?
+            if (!g_decodeCache.count(path))
+                g_decodeCache[path] = result;
+            else
+                delete result;
+        }
+    }).detach();
+}
+
 // --- Yardımcılar ---
+
+// Decode sonucunu renderer'a uygular — UI thread'de çağrılmalıdır.
+// result'ın sahipliğini almaz; çağıran silmekten sorumludur.
+static void ApplyDecodeResult(HWND hwnd, DecodeResult* result);  // ileriye bildirim
 
 static void UpdateWindowTitle(HWND hwnd, const std::wstring& filePath)
 {
@@ -296,6 +370,52 @@ static void StartZoomAnim(HWND hwnd)
     SetTimer(hwnd, kZoomAnimTimerID, kAnimIntervalMs, nullptr);
 }
 
+// --- Decode sonucu uygulama + prefetch tetikleyici ---
+
+// Decode sonucunu renderer'a ve g_imageInfo'ya uygular (UI thread'de çağrılır).
+static void ApplyDecodeResult(HWND hwnd, DecodeResult* result)
+{
+    KillTimer(hwnd, kAnimTimerID);
+    if (g_renderer) g_renderer->ClearAnimation();
+
+    if (g_renderer)
+    {
+        if (!result->frames.empty())
+        {
+            g_renderer->ClearImage();
+            g_renderer->LoadAnimationFrames(result->frames);
+            int firstDur = g_renderer->GetCurrentFrameDuration();
+            SetTimer(hwnd, kAnimTimerID, static_cast<UINT>(firstDur), nullptr);
+        }
+        else if (!result->pixels.empty())
+        {
+            g_renderer->LoadImageFromPixels(
+                result->pixels.data(), result->width, result->height, result->path);
+        }
+        else
+        {
+            g_renderer->ClearImage();
+        }
+    }
+    g_imageInfo = result->info;
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// Mevcut konumun next ve prev görüntülerini prefetch eder.
+static void TriggerPrefetch()
+{
+    if (!g_navigator || g_navigator->empty()) return;
+
+    uint64_t token = ++g_prefetchCancel;
+
+    const std::wstring& nextPath = g_navigator->peek_next();
+    const std::wstring& prevPath = g_navigator->peek_prev();
+
+    StartPrefetch(nextPath, token);
+    if (prevPath != nextPath)
+        StartPrefetch(prevPath, token);
+}
+
 // --- Yardımcı: ViewState'in UI alanlarını koruyarak navigasyon ---
 
 static void NavigateTo(HWND hwnd, const std::wstring& path)
@@ -304,6 +424,7 @@ static void NavigateTo(HWND hwnd, const std::wstring& path)
     KillTimer(hwnd, kZoomAnimTimerID);
     if (g_renderer) g_renderer->ClearAnimation();
     UpdateWindowTitle(hwnd, path);
+
     bool  keepPanel     = g_viewState.showInfoPanel;
     float keepAnimWidth = g_viewState.panelAnimWidth;
     bool  keep12h       = g_viewState.use12HourTime;
@@ -316,6 +437,41 @@ static void NavigateTo(HWND hwnd, const std::wstring& path)
         g_viewState.imageIndex = g_navigator->index() + 1;
         g_viewState.imageTotal = g_navigator->total();
     }
+
+    // Info panelini hemen güncelle: dosya adını göster, EXIF temizle
+    g_imageInfo = ImageInfo{};
+    {
+        auto sep = path.rfind(L'\\');
+        if (sep == std::wstring::npos) sep = path.rfind(L'/');
+        g_imageInfo.filename = (sep != std::wstring::npos) ? path.substr(sep + 1) : path;
+    }
+
+    // Prefetch cache kontrolü — hit ise anında uygula
+    {
+        DecodeResult* cached = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_cacheMutex);
+            auto it = g_decodeCache.find(path);
+            if (it != g_decodeCache.end())
+            {
+                cached = it->second;
+                g_decodeCache.erase(it);
+            }
+        }  // lock burada serbest bırakılır
+
+        if (cached)
+        {
+            // g_decodeGeneration'ı ilerlet — eski decode thread'i (varsa) geçersiz kılınır
+            ++g_decodeGeneration;
+            ApplyDecodeResult(hwnd, cached);
+            delete cached;
+            // Lock serbest bırakıldıktan sonra prefetch tetikle (deadlock önlemi)
+            TriggerPrefetch();
+            return;
+        }
+    }
+
+    // Cache miss — normal decode başlat
     StartDecode(hwnd, path);
     InvalidateRect(hwnd, nullptr, FALSE);
 }
@@ -708,31 +864,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         if (result->generation == g_decodeGeneration.load() && g_renderer)
         {
-            // Önceki animasyonu ve timer'ı temizle
-            KillTimer(hwnd, kAnimTimerID);
-            g_renderer->ClearAnimation();
-
-            if (!result->frames.empty())
-            {
-                // Animated görüntü
-                g_renderer->ClearImage();
-                g_renderer->LoadAnimationFrames(result->frames);
-                int firstDur = g_renderer->GetCurrentFrameDuration();
-                SetTimer(hwnd, kAnimTimerID, static_cast<UINT>(firstDur), nullptr);
-            }
-            else if (!result->pixels.empty())
-            {
-                // Statik görüntü
-                g_renderer->LoadImageFromPixels(
-                    result->pixels.data(), result->width, result->height, result->path);
-            }
-            else
-            {
-                // Decode başarısız — eski bitmap'i temizle, hata mesajı göster
-                g_renderer->ClearImage();
-            }
-            g_imageInfo = result->info;
-            InvalidateRect(hwnd, nullptr, FALSE);
+            ApplyDecodeResult(hwnd, result);
+            // Decode tamamlandı — komşuları arka planda yükle
+            TriggerPrefetch();
         }
 
         delete result;
@@ -742,6 +876,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
         SaveWindowPlacement(hwnd);
         ++g_decodeGeneration;
+        ++g_prefetchCancel;  // Tüm prefetch thread'lerini durdur
         if (g_decodeThread.joinable())
             g_decodeThread.detach();
         KillTimer(hwnd, kZoomIndicatorTimerID);
@@ -749,6 +884,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         KillTimer(hwnd, kAnimTimerID);
         KillTimer(hwnd, kZoomAnimTimerID);
         timeEndPeriod(1);
+        // Prefetch cache'ini temizle
+        {
+            std::lock_guard<std::mutex> lock(g_cacheMutex);
+            for (auto& [path, result] : g_decodeCache)
+                delete result;
+            g_decodeCache.clear();
+        }
         delete g_navigator; g_navigator = nullptr;
         delete g_renderer;  g_renderer  = nullptr;
         PostQuitMessage(0);

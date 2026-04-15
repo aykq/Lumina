@@ -1301,3 +1301,124 @@ bool DecodeImage(const std::wstring& path, DecodeOutput& out)
 
     return ok;
 }
+
+// ─── Thumbnail decode (WIC hızlı yolu + yedek) ────────────────────────────────
+
+// WIC pipeline: Decoder → FormatConverter(BGRA) → BitmapScaler(Fant) → CopyPixels
+// Metadata atlanır (WICDecodeMetadataCacheOnDemand), büyük buffer tahsis edilmez.
+// JPEG, PNG, BMP, TIFF, GIF, ICO için kullanılır.
+static bool DecodeThumbWithWIC(const std::wstring& path, UINT targetH,
+                                std::vector<uint8_t>& pixelsOut,
+                                UINT& widthOut, UINT& heightOut)
+{
+    IWICImagingFactory* wic = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))))
+        return false;
+
+    IWICBitmapDecoder* decoder = nullptr;
+    HRESULT hr = wic->CreateDecoderFromFilename(
+        path.c_str(), nullptr, GENERIC_READ,
+        WICDecodeMetadataCacheOnDemand,  // metadata atlama — thumbnail için gereksiz
+        &decoder);
+    if (FAILED(hr)) { wic->Release(); return false; }
+
+    IWICBitmapFrameDecode* frame = nullptr;
+    hr = decoder->GetFrame(0, &frame);
+    decoder->Release();
+    if (FAILED(hr)) { wic->Release(); return false; }
+
+    UINT srcW = 0, srcH = 0;
+    frame->GetSize(&srcW, &srcH);
+    if (srcW == 0 || srcH == 0) { frame->Release(); wic->Release(); return false; }
+
+    // En-boy oranını koru, hedef yüksekliğe ölçekle
+    UINT dstH = (srcH < targetH) ? srcH : targetH;
+    UINT dstW = srcW * dstH / srcH;
+    if (dstW < 1) dstW = 1;
+
+    // Format dönüştürücü: 32bpp BGRA düz alfa
+    IWICFormatConverter* converter = nullptr;
+    hr = wic->CreateFormatConverter(&converter);
+    if (FAILED(hr)) { frame->Release(); wic->Release(); return false; }
+
+    hr = converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA,
+                               WICBitmapDitherTypeNone, nullptr, 0.0f,
+                               WICBitmapPaletteTypeMedianCut);
+    frame->Release();
+    if (FAILED(hr)) { converter->Release(); wic->Release(); return false; }
+
+    // WIC scaler: Fant interpolation, doğrudan hedef boyuta
+    // (lazy pull model — tam çözünürlük buffer tahsis edilmez)
+    IWICBitmapScaler* scaler = nullptr;
+    hr = wic->CreateBitmapScaler(&scaler);
+    if (FAILED(hr)) { converter->Release(); wic->Release(); return false; }
+
+    hr = scaler->Initialize(converter, dstW, dstH, WICBitmapInterpolationModeFant);
+    converter->Release();
+    if (FAILED(hr)) { scaler->Release(); wic->Release(); return false; }
+
+    pixelsOut.resize(static_cast<size_t>(dstW) * dstH * 4);
+    hr = scaler->CopyPixels(nullptr, dstW * 4,
+                            static_cast<UINT>(pixelsOut.size()), pixelsOut.data());
+    scaler->Release();
+    wic->Release();
+
+    if (FAILED(hr)) { pixelsOut.clear(); return false; }
+
+    PremultiplyBGRA(pixelsOut.data(), dstW, dstH);
+    widthOut  = dstW;
+    heightOut = dstH;
+    return true;
+}
+
+bool DecodeImageForThumbnail(const std::wstring& path, UINT targetH,
+                              std::vector<uint8_t>& pixelsOut,
+                              UINT& widthOut, UINT& heightOut)
+{
+    // WIC hızlı yolu (JPEG, PNG, BMP, TIFF, GIF, ICO)
+    // Desteklenmeyen formatlarda (WebP, HEIC, JXL, AVIF) false döner → yedek yol
+    if (DecodeThumbWithWIC(path, targetH, pixelsOut, widthOut, heightOut))
+        return true;
+
+    // Yedek: tam decode + nearest-neighbor ölçekleme (WebP, HEIC, JXL, AVIF)
+    DecodeOutput decoded;
+    if (!DecodeImage(path, decoded)) return false;
+
+    const uint8_t* srcPixels = nullptr;
+    UINT srcW = 0, srcH = 0;
+    if (!decoded.pixels.empty())
+    {
+        srcPixels = decoded.pixels.data();
+        srcW = decoded.width;
+        srcH = decoded.height;
+    }
+    else if (!decoded.frames.empty())
+    {
+        srcPixels = decoded.frames[0].pixels.data();
+        srcW = decoded.frames[0].width;
+        srcH = decoded.frames[0].height;
+    }
+    if (!srcPixels || srcW == 0 || srcH == 0) return false;
+
+    UINT dstH = (srcH < targetH) ? srcH : targetH;
+    UINT dstW = srcW * dstH / srcH;
+    if (dstW < 1) dstW = 1;
+
+    pixelsOut.resize(static_cast<size_t>(dstW) * dstH * 4);
+    for (UINT dy = 0; dy < dstH; ++dy)
+    {
+        UINT sy = dy * srcH / dstH;
+        for (UINT dx = 0; dx < dstW; ++dx)
+        {
+            UINT sx = dx * srcW / dstW;
+            const uint8_t* s = srcPixels + (sy * srcW + sx) * 4;
+            uint8_t*       d = pixelsOut.data() + (dy * dstW + dx) * 4;
+            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
+        }
+    }
+
+    widthOut  = dstW;
+    heightOut = dstH;
+    return true;
+}

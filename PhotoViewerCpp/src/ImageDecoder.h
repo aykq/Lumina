@@ -49,6 +49,14 @@ struct DecodeOutput
 // Başarılıysa true döner ve out.pixels dolu olur.
 bool DecodeImage(const std::wstring& path, DecodeOutput& out);
 
+// Thumbnail için optimize edilmiş decode: metadata atlanır, WIC scaler pipeline kullanılır.
+// JPEG/PNG/BMP/TIFF/GIF/ICO için büyük buffer tahsis etmeden doğrudan hedef boyuta ölçekler.
+// WebP/HEIC/JXL/AVIF için tam decode + ölçekleme yedek yolu kullanılır.
+// Başarılıysa true döner; pixelsOut BGRA pre-multiplied, boyut widthOut × heightOut.
+bool DecodeImageForThumbnail(const std::wstring& path, UINT targetH,
+                              std::vector<uint8_t>& pixelsOut,
+                              UINT& widthOut, UINT& heightOut);
+
 // Nominatim reverse geocoding: koordinatları konum adına çevirir.
 // Başarılıysa L"Şehir, İl, Ülke" formatında döner; hata durumunda boş wstring.
 std::wstring FetchLocationName(double latDecimal, double lonDecimal);

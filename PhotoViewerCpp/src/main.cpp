@@ -455,31 +455,6 @@ static void TriggerPrefetch()
 
 // --- Thumbnail decode yardımcıları ---
 
-// Piksel buffer'ını en-boy oranını koruyarak hedef yüksekliğe ölçekler (BGRA, nearest-neighbor)
-static std::vector<uint8_t> ScalePixelsToHeight(
-    const uint8_t* src, UINT srcW, UINT srcH, UINT targetH, UINT& outW)
-{
-    if (srcW == 0 || srcH == 0 || targetH == 0) { outW = 0; return {}; }
-    UINT dstH = (srcH < targetH) ? srcH : targetH;
-    UINT dstW = srcW * dstH / srcH;
-    if (dstW < 1) dstW = 1;
-    outW = dstW;
-
-    std::vector<uint8_t> dst(dstW * dstH * 4);
-    for (UINT dy = 0; dy < dstH; ++dy)
-    {
-        UINT sy = dy * srcH / dstH;
-        for (UINT dx = 0; dx < dstW; ++dx)
-        {
-            UINT sx = dx * srcW / dstW;
-            const uint8_t* s = src + (sy * srcW + sx) * 4;
-            uint8_t*       d = dst.data() + (dy * dstW + dx) * 4;
-            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
-        }
-    }
-    return dst;
-}
-
 struct ThumbResult
 {
     std::wstring         path;
@@ -499,45 +474,22 @@ static void StartThumbDecode(HWND hwnd, const std::wstring& path, uint64_t cance
 
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-        DecodeOutput decoded;
-        bool ok = DecodeImage(path, decoded);
+        constexpr UINT kTargetH = static_cast<UINT>(StripLayout::ThumbH);
+        std::vector<uint8_t> pixels;
+        UINT outW = 0, outH = 0;
+        bool ok = DecodeImageForThumbnail(path, kTargetH, pixels, outW, outH);
 
         CoUninitialize();
 
         if (g_thumbCancel.load() != cancelToken) return;
-        if (!ok) return;
+        if (!ok || pixels.empty()) return;
 
-        // Statik veya animasyonun ilk frame'i
-        const uint8_t* srcPixels = nullptr;
-        UINT srcW = 0, srcH = 0;
-        if (!decoded.pixels.empty())
-        {
-            srcPixels = decoded.pixels.data();
-            srcW = decoded.width;
-            srcH = decoded.height;
-        }
-        else if (!decoded.frames.empty())
-        {
-            srcPixels = decoded.frames[0].pixels.data();
-            srcW = decoded.frames[0].width;
-            srcH = decoded.frames[0].height;
-        }
-        if (!srcPixels || srcW == 0 || srcH == 0) return;
-
-        constexpr UINT kTargetH = static_cast<UINT>(StripLayout::ThumbH);
-        UINT outW = 0;
-        auto scaled = ScalePixelsToHeight(srcPixels, srcW, srcH, kTargetH, outW);
-        if (scaled.empty()) return;
-
-        if (g_thumbCancel.load() != cancelToken) return;
-
-        auto* result         = new ThumbResult();
-        result->path         = path;
-        result->pixels       = std::move(scaled);
-        result->width        = outW;
-        result->height       = static_cast<UINT>(StripLayout::ThumbH) <= srcH
-                                 ? kTargetH : srcH;
-        result->cancelToken  = cancelToken;
+        auto* result        = new ThumbResult();
+        result->path        = path;
+        result->pixels      = std::move(pixels);
+        result->width       = outW;
+        result->height      = outH;
+        result->cancelToken = cancelToken;
 
         PostMessage(hwnd, WM_THUMB_DONE, 0, reinterpret_cast<LPARAM>(result));
     }).detach();
@@ -1352,6 +1304,11 @@ int WINAPI WinMain(
         }
 
         StartDecode(hwnd, filePath);
+
+        // Thumbnail decode'larını ana decode ile paralel başlat
+        // (WM_DECODE_DONE beklenmez — her ikisi de eş zamanlı çalışır)
+        UpdateStripSlots();
+        TriggerThumbFetches(hwnd);
     }
 
     ShowWindow(hwnd, nCmdShow);

@@ -1,6 +1,7 @@
 #include "Renderer.h"
 #include "ImageDecoder.h"
 #include <cwchar>
+#include <algorithm>
 
 Renderer::Renderer(HWND hwnd) : m_hwnd(hwnd)
 {
@@ -138,6 +139,12 @@ void Renderer::DiscardDeviceResources()
     m_animBitmaps.clear();
     m_animDurations.clear();
     m_animFrameIdx = 0;
+
+    // Thumbnail cache'ini serbest bırak (cihaza bağlı bitmap'ler)
+    for (auto& [path, bmp] : m_thumbCache) if (bmp) bmp->Release();
+    m_thumbCache.clear();
+    m_thumbOrder.clear();
+
     if (m_bitmap)           { m_bitmap->Release();           m_bitmap = nullptr; }
     if (m_separatorBrush)   { m_separatorBrush->Release();   m_separatorBrush = nullptr; }
     if (m_panelBgBrush)     { m_panelBgBrush->Release();     m_panelBgBrush = nullptr; }
@@ -257,22 +264,22 @@ void Renderer::DrawNavArrows(const ViewState& vs)
     constexpr float kSqRadius = 10.0f;
     constexpr float kSqMargin = 8.0f;
 
-    // Sol ok
+    // Sol ok (basılıysa açık tint, değilse koyu)
     D2D1_ROUNDED_RECT leftRR = {
         D2D1::RectF(kSqMargin,            midY - kSqSize * 0.5f,
                     kSqMargin + kSqSize,   midY + kSqSize * 0.5f),
         kSqRadius, kSqRadius
     };
-    m_renderTarget->FillRoundedRectangle(leftRR, m_panelBgBrush);
+    m_renderTarget->FillRoundedRectangle(leftRR, vs.leftArrowPressed  ? m_activeBrush : m_panelBgBrush);
     m_renderTarget->DrawText(L"\u2039", 1, m_textFormat, leftRR.rect, m_whiteBrush);
 
-    // Sağ ok
+    // Sağ ok (basılıysa açık tint, değilse koyu)
     D2D1_ROUNDED_RECT rightRR = {
         D2D1::RectF(availW - kSqMargin - kSqSize, midY - kSqSize * 0.5f,
                     availW - kSqMargin,            midY + kSqSize * 0.5f),
         kSqRadius, kSqRadius
     };
-    m_renderTarget->FillRoundedRectangle(rightRR, m_panelBgBrush);
+    m_renderTarget->FillRoundedRectangle(rightRR, vs.rightArrowPressed ? m_activeBrush : m_panelBgBrush);
     m_renderTarget->DrawText(L"\u203A", 1, m_textFormat, rightRR.rect, m_whiteBrush);
 }
 
@@ -281,6 +288,7 @@ void Renderer::DrawNavArrows(const ViewState& vs)
 void Renderer::DrawIndexBar(const ViewState& vs)
 {
     if (vs.imageTotal <= 0) return;
+    if (vs.indexBarAlpha <= 0.01f) return;
     if (!m_indexFormat || !m_overlayBrush || !m_whiteBrush) return;
 
     wchar_t text[32];
@@ -291,17 +299,27 @@ void Renderer::DrawIndexBar(const ViewState& vs)
     constexpr float kH      = 34.0f;
     constexpr float kMargin = 12.0f;
 
-    float availW = sz.width - vs.panelAnimWidth;
+    float availW      = sz.width - vs.panelAnimWidth;
+    float bottomOff   = vs.stripAnimHeight + kMargin;  // strip açıksa yukarı kayar
     D2D1_RECT_F bgRect = D2D1::RectF(
-        (availW - kW) * 0.5f,   sz.height - kH - kMargin,
-        (availW + kW) * 0.5f,   sz.height - kMargin
+        (availW - kW) * 0.5f,   sz.height - kH - bottomOff,
+        (availW + kW) * 0.5f,   sz.height - bottomOff
     );
+
+    // Alpha uygulamak için brush opaklıklarını geçici olarak ayarla
+    float savedOverlayOp = m_overlayBrush->GetOpacity();
+    float savedWhiteOp   = m_whiteBrush->GetOpacity();
+    m_overlayBrush->SetOpacity(savedOverlayOp * vs.indexBarAlpha);
+    m_whiteBrush->SetOpacity(savedWhiteOp   * vs.indexBarAlpha);
 
     D2D1_ROUNDED_RECT rr = { bgRect, 6.0f, 6.0f };
     m_renderTarget->FillRoundedRectangle(rr, m_overlayBrush);
     m_renderTarget->DrawText(
         text, static_cast<UINT32>(wcslen(text)), m_indexFormat, bgRect, m_whiteBrush
     );
+
+    m_overlayBrush->SetOpacity(savedOverlayOp);
+    m_whiteBrush->SetOpacity(savedWhiteOp);
 }
 
 // ─── Tarih biçimlendirme yardımcısı ──────────────────────────────────────────
@@ -643,8 +661,8 @@ void Renderer::DrawInfoButton(const ViewState& vs)
     D2D1_RECT_F rect = D2D1::RectF(x0, y0, x1, y1);
     D2D1_ROUNDED_RECT rr = { rect, 8.0f, 8.0f };
 
-    // Active (panel open): beyaz tint dolgu; inactive: panel arka planıyla aynı koyu
-    auto* fillBrush = vs.showInfoPanel ? m_activeBrush : m_panelBgBrush;
+    // Sadece fiziksel basışta (infoBtnPressed) açık tint; diğer zamanlarda koyu
+    auto* fillBrush = vs.infoBtnPressed ? m_activeBrush : m_panelBgBrush;
     m_renderTarget->FillRoundedRectangle(rr, fillBrush);
 
     // Kenar çizgisi
@@ -714,12 +732,14 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
 
     // Overlaylar (arka plandan öne doğru)
     DrawNavArrows(vs);
+    if (vs.stripAnimHeight > 0.0f) DrawThumbnailStrip(vs);
     DrawIndexBar(vs);
+    DrawStripToggle(vs);
     if (vs.panelAnimWidth > 0.0f) DrawInfoPanel(vs, info);
     DrawInfoButton(vs);  // Info panelinin üstünde çizilir
 
-    // Zoom indicator: sağ alt köşe
-    if (vs.showZoomIndicator && m_textFormat && m_whiteBrush && m_overlayBrush)
+    // Zoom indicator: sağ alt köşe (alpha fade)
+    if (vs.zoomIndicatorAlpha > 0.01f && m_textFormat && m_whiteBrush && m_overlayBrush)
     {
         D2D1_SIZE_F wndSize = m_renderTarget->GetSize();
         wchar_t text[16];
@@ -729,19 +749,28 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
         constexpr float kH      = 34.0f;
         constexpr float kMargin = 12.0f;
 
-        float rightEdge = wndSize.width - vs.panelAnimWidth;
+        float rightEdge  = wndSize.width - vs.panelAnimWidth;
+        float bottomBase = wndSize.height - vs.stripAnimHeight - kMargin;
         D2D1_RECT_F bgRect = D2D1::RectF(
             rightEdge - kW - kMargin,
-            wndSize.height - kH - kMargin,
+            bottomBase - kH,
             rightEdge - kMargin,
-            wndSize.height - kMargin
+            bottomBase
         );
+
+        float savedOverlayOp = m_overlayBrush->GetOpacity();
+        float savedWhiteOp   = m_whiteBrush->GetOpacity();
+        m_overlayBrush->SetOpacity(savedOverlayOp * vs.zoomIndicatorAlpha);
+        m_whiteBrush->SetOpacity(savedWhiteOp   * vs.zoomIndicatorAlpha);
 
         D2D1_ROUNDED_RECT rr = { bgRect, 6.0f, 6.0f };
         m_renderTarget->FillRoundedRectangle(rr, m_overlayBrush);
         m_renderTarget->DrawText(
             text, static_cast<UINT32>(wcslen(text)), m_textFormat, bgRect, m_whiteBrush
         );
+
+        m_overlayBrush->SetOpacity(savedOverlayOp);
+        m_whiteBrush->SetOpacity(savedWhiteOp);
     }
 
     HRESULT hr = m_renderTarget->EndDraw();
@@ -754,4 +783,232 @@ void Renderer::Resize(UINT width, UINT height)
 {
     if (m_renderTarget)
         m_renderTarget->Resize(D2D1::SizeU(width, height));
+}
+
+// ─── Thumbnail Cache ──────────────────────────────────────────────────────────
+
+void Renderer::LoadThumbnail(const std::wstring& path, const uint8_t* pixels, UINT w, UINT h)
+{
+    if (path.empty() || !pixels || w == 0 || h == 0) return;
+    if (FAILED(CreateDeviceResources()) || !m_renderTarget) return;
+
+    // Mevcut kaydı varsa önce kaldır (güncelleme)
+    auto existing = m_thumbCache.find(path);
+    if (existing != m_thumbCache.end())
+    {
+        if (existing->second) existing->second->Release();
+        m_thumbCache.erase(existing);
+        auto it = std::find(m_thumbOrder.begin(), m_thumbOrder.end(), path);
+        if (it != m_thumbOrder.end()) m_thumbOrder.erase(it);
+    }
+
+    // LRU — önbellek doluysa en eski girdiyi çıkar
+    if (static_cast<int>(m_thumbCache.size()) >= StripLayout::ThumbCacheMax)
+    {
+        const std::wstring& oldest = m_thumbOrder.front();
+        auto it = m_thumbCache.find(oldest);
+        if (it != m_thumbCache.end())
+        {
+            if (it->second) it->second->Release();
+            m_thumbCache.erase(it);
+        }
+        m_thumbOrder.pop_front();
+    }
+
+    D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
+    );
+    ID2D1Bitmap* bmp = nullptr;
+    if (SUCCEEDED(m_renderTarget->CreateBitmap(D2D1::SizeU(w, h), pixels, w * 4, props, &bmp)) && bmp)
+    {
+        m_thumbCache[path] = bmp;
+        m_thumbOrder.push_back(path);
+    }
+}
+
+bool Renderer::HasThumbnail(const std::wstring& path) const
+{
+    return m_thumbCache.count(path) > 0;
+}
+
+void Renderer::ClearThumbnails()
+{
+    for (auto& [path, bmp] : m_thumbCache) if (bmp) bmp->Release();
+    m_thumbCache.clear();
+    m_thumbOrder.clear();
+}
+
+void Renderer::SetStripSlots(const std::vector<std::wstring>& paths, int currentIdx)
+{
+    m_stripPaths      = paths;
+    m_stripCurrentIdx = currentIdx;
+    m_thumbRects.assign(paths.size(), D2D1::RectF(0, 0, 0, 0));
+}
+
+int Renderer::GetThumbClickOffset(float x, float y) const
+{
+    for (int i = 0; i < static_cast<int>(m_thumbRects.size()); ++i)
+    {
+        const D2D1_RECT_F& r = m_thumbRects[i];
+        if (r.right <= r.left) continue;  // henüz çizilmedi
+        if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)
+            return i - m_stripCurrentIdx;
+    }
+    return INT_MIN;
+}
+
+// ─── Thumbnail Strip ──────────────────────────────────────────────────────────
+
+void Renderer::DrawThumbnailStrip(const ViewState& vs)
+{
+    if (!m_renderTarget || !m_overlayBrush || !m_panelBgBrush || !m_separatorBrush) return;
+    if (vs.stripAnimHeight < 1.0f) return;
+
+    D2D1_SIZE_F sz    = m_renderTarget->GetSize();
+    float availW      = sz.width - vs.panelAnimWidth;
+    float stripY      = sz.height - vs.stripAnimHeight;
+
+    // Clip: strip alanının dışına çizim çıkmasını engelle
+    D2D1_RECT_F stripRect = D2D1::RectF(0.0f, stripY, availW, sz.height);
+    m_renderTarget->PushAxisAlignedClip(stripRect, D2D1_ANTIALIAS_MODE_ALIASED);
+
+    // Arka plan (#1A1A1A, tam opak)
+    m_renderTarget->FillRectangle(stripRect, m_panelBgBrush);
+
+    // Üst kenar çizgisi (#333333)
+    m_renderTarget->DrawLine(
+        D2D1::Point2F(0.0f, stripY),
+        D2D1::Point2F(availW, stripY),
+        m_separatorBrush, 1.0f
+    );
+
+    int n = static_cast<int>(m_stripPaths.size());
+    if (n == 0)
+    {
+        m_renderTarget->PopAxisAlignedClip();
+        return;
+    }
+
+    // Her thumbnail için genişlik hesapla (yüklüyse oransal, değilse varsayılan 100px)
+    constexpr float kThumbH = StripLayout::ThumbH;
+    constexpr float kPadX   = StripLayout::PadX;
+    constexpr float kDefW   = 100.0f;
+    constexpr float kMaxW   = 130.0f;
+
+    std::vector<float> widths(n, kDefW);
+    for (int i = 0; i < n; ++i)
+    {
+        auto it = m_thumbCache.find(m_stripPaths[i]);
+        if (it != m_thumbCache.end() && it->second)
+        {
+            D2D1_SIZE_F bmpSz = it->second->GetSize();
+            if (bmpSz.height > 0.0f)
+            {
+                float w = kThumbH * bmpSz.width / bmpSz.height;
+                widths[i] = (w > kMaxW) ? kMaxW : w;
+            }
+        }
+    }
+
+    float thumbY = stripY + (vs.stripAnimHeight - kThumbH) * 0.5f;
+
+    if (static_cast<int>(m_thumbRects.size()) != n)
+        m_thumbRects.assign(n, D2D1::RectF(0, 0, 0, 0));
+
+    // Mevcut fotoğraf (m_stripCurrentIdx) her zaman strip'in yatay ortasında konumlanır.
+    // Slotlar orta noktadan dışarıya doğru yerleştirilir.
+    std::vector<float> positions(n, 0.0f);
+    {
+        float curW  = widths[m_stripCurrentIdx];
+        float curX  = availW * 0.5f - curW * 0.5f;
+        positions[m_stripCurrentIdx] = curX;
+
+        // Sola doğru
+        float x = curX;
+        for (int i = m_stripCurrentIdx - 1; i >= 0; --i)
+        {
+            x -= widths[i] + kPadX;
+            positions[i] = x;
+        }
+        // Sağa doğru
+        x = curX + curW + kPadX;
+        for (int i = m_stripCurrentIdx + 1; i < n; ++i)
+        {
+            positions[i] = x;
+            x += widths[i] + kPadX;
+        }
+    }
+
+    for (int i = 0; i < n; ++i)
+    {
+        float w = widths[i];
+        D2D1_RECT_F r = D2D1::RectF(positions[i], thumbY, positions[i] + w, thumbY + kThumbH);
+
+        if (m_stripPaths[i].empty())
+        {
+            // Fotoğraf yok (sınır dışı) — boş slot, hit-test devre dışı
+            m_thumbRects[i] = D2D1::RectF(0, 0, 0, 0);
+            // Strip arka planıyla aynı renk → görünmez
+            m_renderTarget->FillRectangle(r, m_panelBgBrush);
+        }
+        else
+        {
+            m_thumbRects[i] = r;
+
+            auto it = m_thumbCache.find(m_stripPaths[i]);
+            if (it != m_thumbCache.end() && it->second)
+            {
+                m_renderTarget->DrawBitmap(it->second, r, 1.0f,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            }
+            else
+            {
+                // Yükleniyor placeholder (gri)
+                m_renderTarget->FillRectangle(r, m_overlayBrush);
+            }
+
+            // Aktif thumbnail: beyaz çerçeve (2px)
+            if (i == m_stripCurrentIdx && m_whiteBrush)
+                m_renderTarget->DrawRectangle(r, m_whiteBrush, 2.0f);
+        }
+
+    }
+
+    m_renderTarget->PopAxisAlignedClip();
+}
+
+// ─── Strip Toggle Pill ────────────────────────────────────────────────────────
+
+void Renderer::DrawStripToggle(const ViewState& vs)
+{
+    if (!m_renderTarget || !m_overlayBrush || !m_whiteBrush || !m_toggleFormat) return;
+    if (vs.imageTotal <= 0) { m_stripToggleVisible = false; return; }
+
+    D2D1_SIZE_F sz = m_renderTarget->GetSize();
+    float availW   = sz.width - vs.panelAnimWidth;
+
+    constexpr float kW      = StripLayout::ToggleW;
+    constexpr float kH      = StripLayout::ToggleH;
+    constexpr float kMargin = 10.0f;
+
+    // Sol alt köşe, strip'in üstüne yapışık
+    float x0 = kMargin;
+    float y0 = sz.height - vs.stripAnimHeight - kH - kMargin;
+    float x1 = x0 + kW;
+    float y1 = y0 + kH;
+
+    D2D1_RECT_F rect = D2D1::RectF(x0, y0, x1, y1);
+    D2D1_ROUNDED_RECT rr = { rect, 5.0f, 5.0f };
+
+    // Info butonu ile aynı stil: koyu dolgu, basılıyken açık tint, her zaman ince border
+    auto* fillBrush = vs.toggleBtnPressed ? m_activeBrush : m_panelBgBrush;
+    m_renderTarget->FillRoundedRectangle(rr, fillBrush);
+    m_renderTarget->DrawRoundedRectangle(rr, m_separatorBrush, 1.0f);
+
+    // ▼ = strip açık (kapat), ▲ = strip kapalı (aç)
+    const wchar_t* arrow = vs.showThumbStrip ? L"\u25BC" : L"\u25B2";
+    m_renderTarget->DrawText(arrow, 1, m_toggleFormat, rect, m_whiteBrush);
+
+    m_stripToggleRect    = rect;
+    m_stripToggleVisible = true;
 }

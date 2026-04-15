@@ -7,6 +7,8 @@
 #include <string>
 #include <cstdint>
 #include <vector>
+#include <map>
+#include <deque>
 #include "ImageDecoder.h"
 
 // Direct2D, DirectWrite ve WIC kütüphanelerini otomatik linkle
@@ -31,6 +33,18 @@ namespace PanelLayout {
 namespace InfoButton {
     constexpr float Size   = 32.0f;  // buton genişlik/yükseklik
     constexpr float Margin = 12.0f;  // pencere kenarından mesafe
+}
+
+// Thumbnail strip boyutları — hem Renderer hem main.cpp tarafından kullanılır
+namespace StripLayout {
+    constexpr float OpenH     = 88.0f;  // strip açık yüksekliği
+    constexpr float ThumbH    = 68.0f;  // thumbnail yüksekliği
+    constexpr float PadY      = 10.0f;  // üst/alt dolgu
+    constexpr float PadX      =  4.0f;  // thumbnail arası boşluk
+    constexpr float ToggleW   = 48.0f;  // toggle pill genişliği
+    constexpr float ToggleH   = 18.0f;  // toggle pill yüksekliği
+    constexpr int   HalfCount =  4;     // mevcut her iki yanındaki thumbnail sayısı
+    constexpr int   ThumbCacheMax = 20; // maksimum önbellek girdi sayısı
 }
 
 // Görüntüye ait metadata (decode thread'de doldurulur, UI thread'de okunur)
@@ -75,12 +89,19 @@ struct ViewState
     float zoomTarget        = 1.0f;
     float panXTarget        = 0.0f;
     float panYTarget        = 0.0f;
-    bool  showZoomIndicator = false;  // Zoom overlay gösterilsin mi?
     bool  showInfoPanel     = false;  // I tuşuyla toggle — navigasyonda sıfırlanmaz
     float panelAnimWidth    = 0.0f;   // Animasyonlu panel genişliği (0.0–PanelLayout::Width)
     bool  use12HourTime     = false;  // T tuşuyla toggle — 12h/24h saat gösterimi
     int   imageIndex        = 0;      // 1-based; 0 = klasör yok
     int   imageTotal        = 0;      // 0 = klasör yok
+    bool  showThumbStrip    = true;   // F tuşuyla toggle — thumbnail filmstrip
+    float stripAnimHeight   = 0.0f;   // Animasyonlu strip yüksekliği (0.0–StripLayout::OpenH)
+    bool  infoBtnPressed       = false;  // Info butonu basılı tutulurken geçici highlight
+    bool  toggleBtnPressed     = false;  // Filmstrip toggle pill basılı tutulurken highlight
+    float indexBarAlpha        = 1.0f;   // Index göstergesi opaklığı (0=görünmez, 1=tam)
+    float zoomIndicatorAlpha   = 0.0f;   // Zoom göstergesi opaklığı — alpha>0 ise çizilir
+    bool  leftArrowPressed     = false;  // Sol ok basılı (press highlight)
+    bool  rightArrowPressed    = false;  // Sağ ok basılı (press highlight)
 };
 
 // Renderer: Direct2D render target yönetimi + WIC görüntü yükleme
@@ -124,6 +145,18 @@ public:
     int  AdvanceFrame();               // bir sonraki frame'e geç, yeni frame süresi (ms) döner
     int  GetCurrentFrameDuration() const;
 
+    // Thumbnail strip — main.cpp tarafından yönetilir
+    void LoadThumbnail(const std::wstring& path, const uint8_t* pixels, UINT w, UINT h);
+    bool HasThumbnail(const std::wstring& path) const;
+    void ClearThumbnails();
+    // Hangi slot'ların gösterileceğini ayarla: paths[currentIdx] = mevcut görüntü
+    void SetStripSlots(const std::vector<std::wstring>& paths, int currentIdx);
+    // Strip toggle pill rect — her frame'de güncellenir
+    D2D1_RECT_F GetStripToggleRect()    const { return m_stripToggleRect; }
+    bool        IsStripToggleVisible()  const { return m_stripToggleVisible; }
+    // Tıklanan thumbnail'in mevcut görüntüye göre ofseti; kapsam dışıysa INT_MIN döner
+    int  GetThumbClickOffset(float x, float y) const;
+
 private:
     // GPU cihazına bağlı kaynakları oluştur
     HRESULT CreateDeviceResources();
@@ -137,6 +170,8 @@ private:
     void DrawIndexBar(const ViewState& vs);
     void DrawInfoPanel(const ViewState& vs, const ImageInfo* info);
     void DrawInfoButton(const ViewState& vs);
+    void DrawThumbnailStrip(const ViewState& vs);
+    void DrawStripToggle(const ViewState& vs);
 
     HWND                   m_hwnd         = nullptr;
     ID2D1Factory*          m_factory      = nullptr;   // Direct2D fabrikası (cihazdan bağımsız)
@@ -174,4 +209,17 @@ private:
     std::vector<ID2D1Bitmap*> m_animBitmaps;
     std::vector<int>          m_animDurations;  // ms, m_animBitmaps ile 1:1
     int                       m_animFrameIdx = 0;
+
+    // Thumbnail cache (cihaza bağlı) — LRU, en fazla StripLayout::ThumbCacheMax girdi
+    std::map<std::wstring, ID2D1Bitmap*> m_thumbCache;
+    std::deque<std::wstring>             m_thumbOrder;  // LRU sırası (en eskisi önde)
+
+    // Strip slot bilgisi — SetStripSlots tarafından güncellenir
+    std::vector<std::wstring> m_stripPaths;      // gösterilecek sıralı yol listesi
+    int                       m_stripCurrentIdx = 0;  // m_stripPaths içindeki mevcut indeks
+
+    // Strip toggle + thumb hit-test rect'leri — her Render'da güncellenir
+    D2D1_RECT_F              m_stripToggleRect    = {};
+    bool                     m_stripToggleVisible = false;
+    std::vector<D2D1_RECT_F> m_thumbRects;   // m_stripPaths ile 1:1 hizalı
 };

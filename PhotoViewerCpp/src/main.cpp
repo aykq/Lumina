@@ -18,10 +18,15 @@
 // --- Sabitler ---
 
 static constexpr UINT     WM_DECODE_DONE        = WM_APP + 1;
+static constexpr UINT     WM_THUMB_DONE         = WM_APP + 3;
 static constexpr UINT_PTR kZoomIndicatorTimerID = 1;
 static constexpr UINT_PTR kPanelAnimTimerID     = 2;
 static constexpr UINT_PTR kAnimTimerID          = 3;
 static constexpr UINT_PTR kZoomAnimTimerID      = 4;
+static constexpr UINT_PTR kStripAnimTimerID     = 5;
+static constexpr UINT_PTR kIndexIdleTimerID     = 6;  // 1.5s hareketsizlik → index fade başlar
+static constexpr UINT_PTR kIndexFadeTimerID     = 7;  // index bar alpha animasyonu
+static constexpr UINT_PTR kZoomFadeTimerID      = 8;  // zoom indicator alpha animasyonu
 
 // Animasyon timer aralığı — 7ms ≈ 143fps (timeBeginPeriod(1) ile hassas çalışır)
 static constexpr UINT     kAnimIntervalMs       = 7;
@@ -30,11 +35,15 @@ static constexpr UINT     kAnimIntervalMs       = 7;
 // lerp_per_frame = 1 - exp(-dt * speed); 60fps'de panel ≈ 0.33, zoom ≈ 0.25
 static constexpr float    kPanelAnimSpeed       = 25.0f;
 static constexpr float    kZoomAnimSpeed        = 30.0f;
+static constexpr float    kStripAnimSpeed       = 25.0f;
 
 // QPC frekansı ve son-tick zamanları — delta-time hesabı için
 static LARGE_INTEGER      g_qpcFreq             = {};
 static LARGE_INTEGER      g_panelAnimLastTime   = {};
 static LARGE_INTEGER      g_zoomAnimLastTime    = {};
+static LARGE_INTEGER      g_stripAnimLastTime   = {};
+static LARGE_INTEGER      g_indexFadeLastTime   = {};
+static LARGE_INTEGER      g_zoomFadeLastTime    = {};
 
 // --- Arka plan decode ---
 
@@ -59,6 +68,9 @@ static std::mutex                                       g_cacheMutex;
 static std::unordered_map<std::wstring, DecodeResult*> g_decodeCache;
 static constexpr size_t                                kCacheMaxSize = 4;
 static std::atomic<uint64_t>                           g_prefetchCancel{0};
+
+// --- Thumbnail decode cancel ---
+static std::atomic<uint64_t>                           g_thumbCancel{0};
 
 // --- Decode yardımcıları ---
 
@@ -228,6 +240,7 @@ static float g_mouseDownY        = 0.0f;
 static bool  g_clickIsLeft       = false;
 static bool  g_clickIsInfoButton = false;
 static bool  g_clickInPanel      = false;  // Panel alanı tıklaması — drag/zoom engellenir
+static bool  g_clickInStrip      = false;  // Strip veya toggle tıklaması
 
 
 // --- Yardımcı: arrow zone hit-test ---
@@ -274,6 +287,8 @@ static void SaveSettings()
         RegSetValueExW(hKey, L"ShowInfoPanel",  0, REG_DWORD, reinterpret_cast<const BYTE*>(&val), sizeof(DWORD));
         val = g_viewState.use12HourTime ? 1 : 0;
         RegSetValueExW(hKey, L"Use12HourTime", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&val), sizeof(DWORD));
+        val = g_viewState.showThumbStrip ? 1 : 0;
+        RegSetValueExW(hKey, L"ShowThumbStrip", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&val), sizeof(DWORD));
         RegCloseKey(hKey);
     }
 }
@@ -329,6 +344,9 @@ static void LoadSettings()
         sz = sizeof(DWORD);
         if (RegQueryValueExW(hKey, L"Use12HourTime", nullptr, nullptr, reinterpret_cast<LPBYTE>(&val), &sz) == ERROR_SUCCESS)
             g_viewState.use12HourTime = (val != 0);
+        sz = sizeof(DWORD);
+        if (RegQueryValueExW(hKey, L"ShowThumbStrip", nullptr, nullptr, reinterpret_cast<LPBYTE>(&val), &sz) == ERROR_SUCCESS)
+            g_viewState.showThumbStrip = (val != 0);
 
         // Pencere pozisyon/boyut
         DWORD wx = 0, wy = 0, ww = 0, wh = 0;
@@ -350,8 +368,9 @@ static void LoadSettings()
 
         RegCloseKey(hKey);
     }
-    // Başlangıçta animasyon yok — doğrudan hedef genişliğe atla
-    g_viewState.panelAnimWidth = g_viewState.showInfoPanel ? PanelLayout::Width : 0.0f;
+    // Başlangıçta animasyon yok — doğrudan hedeflere atla
+    g_viewState.panelAnimWidth  = g_viewState.showInfoPanel  ? PanelLayout::Width  : 0.0f;
+    g_viewState.stripAnimHeight = g_viewState.showThumbStrip ? StripLayout::OpenH  : 0.0f;
 }
 
 // --- Animasyon başlatıcıları ---
@@ -368,6 +387,23 @@ static void StartZoomAnim(HWND hwnd)
     QueryPerformanceCounter(&g_zoomAnimLastTime);
     KillTimer(hwnd, kZoomAnimTimerID);
     SetTimer(hwnd, kZoomAnimTimerID, kAnimIntervalMs, nullptr);
+}
+
+static void StartStripAnim(HWND hwnd)
+{
+    QueryPerformanceCounter(&g_stripAnimLastTime);
+    KillTimer(hwnd, kStripAnimTimerID);
+    SetTimer(hwnd, kStripAnimTimerID, kAnimIntervalMs, nullptr);
+}
+
+// Kullanıcı aktivitesinde çağrılır: alpha'yı 1'e sıfırlar,
+// fade timer'larını durdurur ve 5s idle timer'ı yeniden başlatır.
+static void ResetIndexIdleTimer(HWND hwnd)
+{
+    g_viewState.indexBarAlpha = 1.0f;
+    KillTimer(hwnd, kIndexFadeTimerID);
+    KillTimer(hwnd, kIndexIdleTimerID);
+    SetTimer(hwnd, kIndexIdleTimerID, 1500, nullptr);
 }
 
 // --- Decode sonucu uygulama + prefetch tetikleyici ---
@@ -398,6 +434,7 @@ static void ApplyDecodeResult(HWND hwnd, DecodeResult* result)
         }
     }
     g_imageInfo = result->info;
+    ResetIndexIdleTimer(hwnd);
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
@@ -416,6 +453,127 @@ static void TriggerPrefetch()
         StartPrefetch(prevPath, token);
 }
 
+// --- Thumbnail decode yardımcıları ---
+
+// Piksel buffer'ını en-boy oranını koruyarak hedef yüksekliğe ölçekler (BGRA, nearest-neighbor)
+static std::vector<uint8_t> ScalePixelsToHeight(
+    const uint8_t* src, UINT srcW, UINT srcH, UINT targetH, UINT& outW)
+{
+    if (srcW == 0 || srcH == 0 || targetH == 0) { outW = 0; return {}; }
+    UINT dstH = (srcH < targetH) ? srcH : targetH;
+    UINT dstW = srcW * dstH / srcH;
+    if (dstW < 1) dstW = 1;
+    outW = dstW;
+
+    std::vector<uint8_t> dst(dstW * dstH * 4);
+    for (UINT dy = 0; dy < dstH; ++dy)
+    {
+        UINT sy = dy * srcH / dstH;
+        for (UINT dx = 0; dx < dstW; ++dx)
+        {
+            UINT sx = dx * srcW / dstW;
+            const uint8_t* s = src + (sy * srcW + sx) * 4;
+            uint8_t*       d = dst.data() + (dy * dstW + dx) * 4;
+            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
+        }
+    }
+    return dst;
+}
+
+struct ThumbResult
+{
+    std::wstring         path;
+    std::vector<uint8_t> pixels;  // BGRA pre-mul, ölçeklenmiş
+    UINT                 width  = 0;
+    UINT                 height = 0;
+    uint64_t             cancelToken = 0;
+};
+
+static void StartThumbDecode(HWND hwnd, const std::wstring& path, uint64_t cancelToken)
+{
+    if (path.empty()) return;
+
+    std::thread([hwnd, path, cancelToken]()
+    {
+        if (g_thumbCancel.load() != cancelToken) return;
+
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        DecodeOutput decoded;
+        bool ok = DecodeImage(path, decoded);
+
+        CoUninitialize();
+
+        if (g_thumbCancel.load() != cancelToken) return;
+        if (!ok) return;
+
+        // Statik veya animasyonun ilk frame'i
+        const uint8_t* srcPixels = nullptr;
+        UINT srcW = 0, srcH = 0;
+        if (!decoded.pixels.empty())
+        {
+            srcPixels = decoded.pixels.data();
+            srcW = decoded.width;
+            srcH = decoded.height;
+        }
+        else if (!decoded.frames.empty())
+        {
+            srcPixels = decoded.frames[0].pixels.data();
+            srcW = decoded.frames[0].width;
+            srcH = decoded.frames[0].height;
+        }
+        if (!srcPixels || srcW == 0 || srcH == 0) return;
+
+        constexpr UINT kTargetH = static_cast<UINT>(StripLayout::ThumbH);
+        UINT outW = 0;
+        auto scaled = ScalePixelsToHeight(srcPixels, srcW, srcH, kTargetH, outW);
+        if (scaled.empty()) return;
+
+        if (g_thumbCancel.load() != cancelToken) return;
+
+        auto* result         = new ThumbResult();
+        result->path         = path;
+        result->pixels       = std::move(scaled);
+        result->width        = outW;
+        result->height       = static_cast<UINT>(StripLayout::ThumbH) <= srcH
+                                 ? kTargetH : srcH;
+        result->cancelToken  = cancelToken;
+
+        PostMessage(hwnd, WM_THUMB_DONE, 0, reinterpret_cast<LPARAM>(result));
+    }).detach();
+}
+
+// Strip slot'larını navigator'a göre renderer'a yükler
+static void UpdateStripSlots()
+{
+    if (!g_renderer) return;
+    if (!g_navigator || g_navigator->empty())
+    {
+        g_renderer->SetStripSlots({}, 0);
+        return;
+    }
+    constexpr int kHalf = StripLayout::HalfCount;
+    std::vector<std::wstring> paths;
+    paths.reserve(2 * kHalf + 1);
+    for (int i = -kHalf; i <= kHalf; ++i)
+        paths.push_back(g_navigator->peek_at_linear(i));  // döngüsüz: sınır dışı = boş
+    g_renderer->SetStripSlots(paths, kHalf);
+}
+
+// Mevcut strip slot'ları için thumbnail decode'larını başlatır (önbellekte yoksa)
+static void TriggerThumbFetches(HWND hwnd)
+{
+    if (!g_renderer || !g_navigator || g_navigator->empty()) return;
+    uint64_t token = g_thumbCancel.load();
+    constexpr int kHalf = StripLayout::HalfCount;
+    for (int i = -kHalf; i <= kHalf; ++i)
+    {
+        const std::wstring& path = g_navigator->peek_at(i);
+        if (!g_renderer->HasThumbnail(path))
+            StartThumbDecode(hwnd, path, token);
+    }
+}
+
 // --- Yardımcı: ViewState'in UI alanlarını koruyarak navigasyon ---
 
 static void NavigateTo(HWND hwnd, const std::wstring& path)
@@ -424,14 +582,19 @@ static void NavigateTo(HWND hwnd, const std::wstring& path)
     KillTimer(hwnd, kZoomAnimTimerID);
     if (g_renderer) g_renderer->ClearAnimation();
     UpdateWindowTitle(hwnd, path);
+    ++g_thumbCancel;  // Eski thumbnail decode thread'lerini iptal et
 
-    bool  keepPanel     = g_viewState.showInfoPanel;
-    float keepAnimWidth = g_viewState.panelAnimWidth;
-    bool  keep12h       = g_viewState.use12HourTime;
+    bool  keepPanel      = g_viewState.showInfoPanel;
+    float keepAnimWidth  = g_viewState.panelAnimWidth;
+    bool  keep12h        = g_viewState.use12HourTime;
+    bool  keepStrip      = g_viewState.showThumbStrip;
+    float keepStripH     = g_viewState.stripAnimHeight;
     g_viewState = ViewState{};
-    g_viewState.showInfoPanel  = keepPanel;
-    g_viewState.panelAnimWidth = keepAnimWidth;
-    g_viewState.use12HourTime  = keep12h;
+    g_viewState.showInfoPanel   = keepPanel;
+    g_viewState.panelAnimWidth  = keepAnimWidth;
+    g_viewState.use12HourTime   = keep12h;
+    g_viewState.showThumbStrip  = keepStrip;
+    g_viewState.stripAnimHeight = keepStripH;
     if (g_navigator)
     {
         g_viewState.imageIndex = g_navigator->index() + 1;
@@ -467,11 +630,16 @@ static void NavigateTo(HWND hwnd, const std::wstring& path)
             delete cached;
             // Lock serbest bırakıldıktan sonra prefetch tetikle (deadlock önlemi)
             TriggerPrefetch();
+            UpdateStripSlots();
+            TriggerThumbFetches(hwnd);
             return;
         }
     }
 
-    // Cache miss — normal decode başlat
+    // Cache miss — normal decode başlat; strip slot'larını hemen güncelle
+    ResetIndexIdleTimer(hwnd);
+    UpdateStripSlots();
+    TriggerThumbFetches(hwnd);
     StartDecode(hwnd, path);
     InvalidateRect(hwnd, nullptr, FALSE);
 }
@@ -508,7 +676,8 @@ static void ApplyZoom(HWND hwnd, float cx, float cy, float newZoom)
 
 static void ShowZoomIndicator(HWND hwnd)
 {
-    g_viewState.showZoomIndicator = true;
+    g_viewState.zoomIndicatorAlpha = 1.0f;
+    KillTimer(hwnd, kZoomFadeTimerID);
     KillTimer(hwnd, kZoomIndicatorTimerID);
     SetTimer(hwnd, kZoomIndicatorTimerID, 1500, nullptr);
 }
@@ -549,6 +718,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         float cx = static_cast<float>(cursor.x);
         float cy = static_cast<float>(cursor.y);
+
+        // Filmstrip üzerindeyse scroll → navigasyon
+        if (g_viewState.stripAnimHeight > 0.0f && g_navigator && !g_navigator->empty())
+        {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            if (cy >= static_cast<float>(rc.bottom) - g_viewState.stripAnimHeight)
+            {
+                if (delta > 0)
+                    NavigateTo(hwnd, g_navigator->prev());
+                else
+                    NavigateTo(hwnd, g_navigator->next());
+                return 0;
+            }
+        }
+
         // zoomTarget baz alınır — hızlı scroll'da her tick önceki hedef üstüne biner
         float newZoom = g_viewState.zoomTarget * (delta > 0 ? 1.15f : (1.0f / 1.15f));
         ApplyZoom(hwnd, cx, cy, newZoom);
@@ -565,12 +750,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_mouseDownX = mx;
         g_mouseDownY = my;
         SetCapture(hwnd);
+        ResetIndexIdleTimer(hwnd);
 
         // Info button önce kontrol edilir (sağ ok zone ile üst üste gelebilir)
         g_clickIsInfoButton = HitTestInfoButton(hwnd, mx, my, g_viewState.panelAnimWidth);
+        if (g_clickIsInfoButton)
+        {
+            g_viewState.infoBtnPressed = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
 
         if (!g_clickIsInfoButton)
         {
+            // Strip toggle pill tıklaması (strip alanının dışında olabilir)
+            if (g_renderer && g_renderer->IsStripToggleVisible())
+            {
+                D2D1_RECT_F tr = g_renderer->GetStripToggleRect();
+                if (mx >= tr.left && mx <= tr.right && my >= tr.top && my <= tr.bottom)
+                {
+                    g_viewState.toggleBtnPressed = true;
+                    g_clickInStrip = true;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+            }
+
+            // Strip alanına tıklama (thumbnail filmstrip)
+            if (g_viewState.stripAnimHeight > 0.0f)
+            {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                if (my >= static_cast<float>(rc.bottom) - g_viewState.stripAnimHeight)
+                {
+                    g_clickInStrip = true;
+                    return 0;
+                }
+            }
+
             // Panel alanına tıklandığında drag/ok/zoom engellenir
             if (g_viewState.panelAnimWidth > 0.0f)
             {
@@ -589,6 +805,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                              : ArrowZone::None;
             g_mouseInArrowZone = (zone != ArrowZone::None);
             g_clickIsLeft      = (zone == ArrowZone::Left);
+            g_viewState.leftArrowPressed  = (zone == ArrowZone::Left);
+            g_viewState.rightArrowPressed = (zone == ArrowZone::Right);
+            if (g_viewState.leftArrowPressed || g_viewState.rightArrowPressed)
+                InvalidateRect(hwnd, nullptr, FALSE);
 
             // Pan sürüklemeyi başlat
             g_dragging        = true;
@@ -617,6 +837,50 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         bool wasDragging = g_dragging;
         g_dragging = false;
         ReleaseCapture();
+
+        // Press highlight'ları her durumda temizle
+        bool needRepaint = g_viewState.infoBtnPressed
+                        || g_viewState.leftArrowPressed
+                        || g_viewState.rightArrowPressed
+                        || g_viewState.toggleBtnPressed;
+        g_viewState.infoBtnPressed    = false;
+        g_viewState.leftArrowPressed  = false;
+        g_viewState.rightArrowPressed = false;
+        g_viewState.toggleBtnPressed  = false;
+        if (needRepaint)
+            InvalidateRect(hwnd, nullptr, FALSE);
+
+        // Strip / toggle tıklaması
+        if (g_clickInStrip)
+        {
+            g_clickInStrip = false;
+            float delta = fabsf(mx - g_mouseDownX) + fabsf(my - g_mouseDownY);
+            if (delta < 5.0f && g_renderer)
+            {
+                // Toggle pill tıklaması
+                if (g_renderer->IsStripToggleVisible())
+                {
+                    D2D1_RECT_F tr = g_renderer->GetStripToggleRect();
+                    if (mx >= tr.left && mx <= tr.right && my >= tr.top && my <= tr.bottom)
+                    {
+                        g_viewState.showThumbStrip = !g_viewState.showThumbStrip;
+                        SaveSettings();
+                        StartStripAnim(hwnd);
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        return 0;
+                    }
+                }
+
+                // Thumbnail tıklaması — offset kadar navigasyon
+                int offset = g_renderer->GetThumbClickOffset(mx, my);
+                if (offset != INT_MIN && offset != 0 && g_navigator && !g_navigator->empty())
+                {
+                    const std::wstring& path = g_navigator->jump(offset);
+                    NavigateTo(hwnd, path);
+                }
+            }
+            return 0;
+        }
 
         // Panel alanı tıklaması — date toggle ve GPS link kontrol edilir
         if (g_clickInPanel)
@@ -714,6 +978,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 return 0;
         }
 
+        // Strip alanında çift tıklamayı engelle
+        if (g_viewState.stripAnimHeight > 0.0f)
+        {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            if (cy >= static_cast<float>(rc.bottom) - g_viewState.stripAnimHeight)
+                return 0;
+        }
+
+        // Toggle pill üzerinde çift tıklamayı engelle
+        if (g_renderer && g_renderer->IsStripToggleVisible())
+        {
+            D2D1_RECT_F tr = g_renderer->GetStripToggleRect();
+            if (cx >= tr.left && cx <= tr.right && cy >= tr.top && cy <= tr.bottom)
+                return 0;
+        }
+
         if (fabsf(g_viewState.zoomFactor - 1.0f) < 0.02f &&
             fabsf(g_viewState.zoomTarget - 1.0f) < 0.02f)
         {
@@ -754,6 +1035,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 1;
 
     case WM_KEYDOWN:
+        ResetIndexIdleTimer(hwnd);
         switch (wParam)
         {
         case VK_ESCAPE:
@@ -773,6 +1055,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             InvalidateRect(hwnd, nullptr, FALSE);
             break;
 
+        case 'F':
+            g_viewState.showThumbStrip = !g_viewState.showThumbStrip;
+            SaveSettings();
+            StartStripAnim(hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+
         case VK_LEFT:
             if (g_navigator && !g_navigator->empty())
                 NavigateTo(hwnd, g_navigator->prev());
@@ -788,8 +1077,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_TIMER:
         if (wParam == kZoomIndicatorTimerID)
         {
+            // 1.5s doldu — fade animasyonunu başlat
             KillTimer(hwnd, kZoomIndicatorTimerID);
-            g_viewState.showZoomIndicator = false;
+            QueryPerformanceCounter(&g_zoomFadeLastTime);
+            SetTimer(hwnd, kZoomFadeTimerID, kAnimIntervalMs, nullptr);
+        }
+        else if (wParam == kZoomFadeTimerID)
+        {
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            float dt = static_cast<float>(now.QuadPart - g_zoomFadeLastTime.QuadPart)
+                       / static_cast<float>(g_qpcFreq.QuadPart);
+            g_zoomFadeLastTime = now;
+            dt = min(dt, 0.1f);
+
+            constexpr float kFadeSpeed = 1.5f;
+            g_viewState.zoomIndicatorAlpha -= dt * kFadeSpeed;
+            if (g_viewState.zoomIndicatorAlpha <= 0.0f)
+            {
+                g_viewState.zoomIndicatorAlpha = 0.0f;
+                KillTimer(hwnd, kZoomFadeTimerID);
+            }
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         else if (wParam == kPanelAnimTimerID)
@@ -856,6 +1164,54 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
         }
+        else if (wParam == kIndexIdleTimerID)
+        {
+            // 5s hareketsizlik doldu — fade animasyonunu başlat
+            KillTimer(hwnd, kIndexIdleTimerID);
+            QueryPerformanceCounter(&g_indexFadeLastTime);
+            SetTimer(hwnd, kIndexFadeTimerID, kAnimIntervalMs, nullptr);
+        }
+        else if (wParam == kIndexFadeTimerID)
+        {
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            float dt = static_cast<float>(now.QuadPart - g_indexFadeLastTime.QuadPart)
+                       / static_cast<float>(g_qpcFreq.QuadPart);
+            g_indexFadeLastTime = now;
+            dt = min(dt, 0.1f);
+
+            constexpr float kFadeSpeed = 1.5f;  // saniyede tam opaklık kaybolur
+            g_viewState.indexBarAlpha -= dt * kFadeSpeed;
+            if (g_viewState.indexBarAlpha <= 0.0f)
+            {
+                g_viewState.indexBarAlpha = 0.0f;
+                KillTimer(hwnd, kIndexFadeTimerID);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        else if (wParam == kStripAnimTimerID)
+        {
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            float dt = static_cast<float>(now.QuadPart - g_stripAnimLastTime.QuadPart)
+                       / static_cast<float>(g_qpcFreq.QuadPart);
+            g_stripAnimLastTime = now;
+            dt = min(dt, 0.1f);
+
+            float lerp   = 1.0f - expf(-dt * kStripAnimSpeed);
+            float target = g_viewState.showThumbStrip ? StripLayout::OpenH : 0.0f;
+            float diff   = target - g_viewState.stripAnimHeight;
+            if (fabsf(diff) < 0.5f)
+            {
+                g_viewState.stripAnimHeight = target;
+                KillTimer(hwnd, kStripAnimTimerID);
+            }
+            else
+            {
+                g_viewState.stripAnimHeight += diff * lerp;
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         return 0;
 
     case WM_DECODE_DONE:
@@ -867,8 +1223,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             ApplyDecodeResult(hwnd, result);
             // Decode tamamlandı — komşuları arka planda yükle
             TriggerPrefetch();
+            // Strip slot'larını güncelle (ilk açılışta NavigateTo çağrılmaz, burada yapılır)
+            UpdateStripSlots();
+            TriggerThumbFetches(hwnd);
         }
 
+        delete result;
+        return 0;
+    }
+
+    case WM_THUMB_DONE:
+    {
+        auto* result = reinterpret_cast<ThumbResult*>(lParam);
+        // Geçersiz token → başka bir navigasyon iptal etti, atla
+        if (result->cancelToken == g_thumbCancel.load() && g_renderer && !result->pixels.empty())
+        {
+            g_renderer->LoadThumbnail(result->path,
+                                      result->pixels.data(),
+                                      result->width,
+                                      result->height);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         delete result;
         return 0;
     }
@@ -877,12 +1252,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SaveWindowPlacement(hwnd);
         ++g_decodeGeneration;
         ++g_prefetchCancel;  // Tüm prefetch thread'lerini durdur
+        ++g_thumbCancel;     // Tüm thumbnail decode thread'lerini durdur
         if (g_decodeThread.joinable())
             g_decodeThread.detach();
         KillTimer(hwnd, kZoomIndicatorTimerID);
         KillTimer(hwnd, kPanelAnimTimerID);
         KillTimer(hwnd, kAnimTimerID);
         KillTimer(hwnd, kZoomAnimTimerID);
+        KillTimer(hwnd, kStripAnimTimerID);
+        KillTimer(hwnd, kIndexIdleTimerID);
+        KillTimer(hwnd, kIndexFadeTimerID);
+        KillTimer(hwnd, kZoomFadeTimerID);
         timeEndPeriod(1);
         // Prefetch cache'ini temizle
         {

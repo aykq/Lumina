@@ -98,6 +98,37 @@ public:
         return m_files[idx];
     }
 
+    // İndeksten offset kadar ilerideki/gerideki dosya yolunu döner (döngüsel, indeks değişmez)
+    const std::wstring& peek_at(int offset) const
+    {
+        static const std::wstring kEmpty;
+        if (m_files.empty()) return kEmpty;
+        int n   = static_cast<int>(m_files.size());
+        int idx = ((m_index + offset) % n + n) % n;
+        return m_files[idx];
+    }
+
+    // Döngüsel olmayan peek — sınır dışındaysa boş string döner (filmstrip için)
+    const std::wstring& peek_at_linear(int offset) const
+    {
+        static const std::wstring kEmpty;
+        if (m_files.empty()) return kEmpty;
+        int idx = m_index + offset;
+        if (idx < 0 || idx >= static_cast<int>(m_files.size())) return kEmpty;
+        return m_files[idx];
+    }
+
+    // İndeksten offset kadar ileri/geri atlayıp yeni konumu döner (döngüsel)
+    const std::wstring& jump(int offset)
+    {
+        if (!m_files.empty())
+        {
+            int n   = static_cast<int>(m_files.size());
+            m_index = ((m_index + offset) % n + n) % n;
+        }
+        return current();
+    }
+
     // Geçerli dosyanın tam yolunu döner
     const std::wstring& current() const
     {

@@ -20,6 +20,8 @@
 static constexpr UINT     WM_DECODE_DONE        = WM_APP + 1;
 static constexpr UINT     WM_TILE_DONE          = WM_APP + 2;
 static constexpr UINT     WM_THUMB_DONE         = WM_APP + 3;
+static constexpr UINT     WM_META_DONE          = WM_APP + 4;  // hızlı metadata aşaması
+static constexpr UINT     WM_LOCATION_DONE      = WM_APP + 5;  // Nominatim sonucu
 static constexpr UINT_PTR kZoomIndicatorTimerID = 1;
 static constexpr UINT_PTR kPanelAnimTimerID     = 2;
 static constexpr UINT_PTR kAnimTimerID          = 3;
@@ -61,6 +63,20 @@ struct DecodeResult
     std::vector<AnimFrame> frames;
 };
 
+// Hızlı metadata aşaması sonucu — piksel içermez, sadece ImageInfo alanları
+struct MetaResult
+{
+    ImageInfo    info;
+    uint64_t     generation = 0;
+};
+
+// Nominatim reverse geocoding sonucu — piksel decode'dan bağımsız aşama
+struct LocationResult
+{
+    std::wstring locationName;
+    uint64_t     generation = 0;
+};
+
 static std::atomic<uint64_t> g_decodeGeneration{0};
 static std::thread            g_decodeThread;
 
@@ -81,7 +97,8 @@ static std::atomic<uint64_t>                           g_tileCancel{0};
 
 // Ortak decode mantığı — hem ana decode hem prefetch tarafından kullanılır.
 // COM zaten başlatılmış olmalı. result->path önceden doldurulmuş olmalı.
-static void DoDecodeToResult(DecodeResult* result)
+// fetchLocation=false → Nominatim atlanır (StartDecode'da ayrı aşamada yapılır).
+static void DoDecodeToResult(DecodeResult* result, bool fetchLocation = true)
 {
     const std::wstring& path = result->path;
 
@@ -122,8 +139,12 @@ static void DoDecodeToResult(DecodeResult* result)
         result->info.hasGpsDecimal   = decoded.hasGpsDecimal;
         result->info.gpsLatDecimal   = decoded.gpsLatDecimal;
         result->info.gpsLonDecimal   = decoded.gpsLonDecimal;
-        result->info.gpsLocationName = decoded.gpsLocationName;
         result->info.iccProfileName  = decoded.iccProfileName;
+
+        // Nominatim reverse geocoding — fetchLocation=false ise atlanır
+        if (fetchLocation && decoded.hasGpsDecimal)
+            result->info.gpsLocationName =
+                FetchLocationName(decoded.gpsLatDecimal, decoded.gpsLonDecimal);
     }
     else
     {
@@ -142,14 +163,66 @@ static void StartDecode(HWND hwnd, const std::wstring& path)
     {
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+        // ── Aşama 1: Hızlı metadata (piksel decode YOK) ──────────────────────
+        // HEIC/AVIF gibi yavaş formatlarda ~50-100ms; info paneli hemen dolar.
+        {
+            DecodeOutput metaOut;
+            if (ExtractImageMeta(path, metaOut))
+            {
+                // Jenerasyon hâlâ geçerliyse gönder (kullanıcı navigasyon yapmadıysa)
+                if (g_decodeGeneration.load() == gen)
+                {
+                    auto* meta          = new MetaResult();
+                    meta->generation    = gen;
+                    meta->info.width    = static_cast<int>(metaOut.width);
+                    meta->info.height   = static_cast<int>(metaOut.height);
+                    meta->info.format        = metaOut.format;
+                    meta->info.dateTaken     = metaOut.dateTaken;
+                    meta->info.cameraMake    = metaOut.cameraMake;
+                    meta->info.cameraModel   = metaOut.cameraModel;
+                    meta->info.aperture      = metaOut.aperture;
+                    meta->info.shutterSpeed  = metaOut.shutterSpeed;
+                    meta->info.iso           = metaOut.iso;
+                    meta->info.gpsLatitude   = metaOut.gpsLatitude;
+                    meta->info.gpsLongitude  = metaOut.gpsLongitude;
+                    meta->info.gpsAltitude   = metaOut.gpsAltitude;
+                    meta->info.hasGpsDecimal = metaOut.hasGpsDecimal;
+                    meta->info.gpsLatDecimal = metaOut.gpsLatDecimal;
+                    meta->info.gpsLonDecimal = metaOut.gpsLonDecimal;
+                    meta->info.iccProfileName = metaOut.iccProfileName;
+                    PostMessage(hwnd, WM_META_DONE, 0, reinterpret_cast<LPARAM>(meta));
+                }
+            }
+        }
+
+        // ── Aşama 2: Piksel decode (Nominatim YOK — görsel hemen görünsün) ─────
         auto* result       = new DecodeResult();
         result->path       = path;
         result->generation = gen;
 
-        DoDecodeToResult(result);
+        DoDecodeToResult(result, /*fetchLocation=*/false);
+
+        // GPS koordinatlarını Aşama 3 için kopyala (result UI thread'ine devrediliyor)
+        const bool   hasGps = result->info.hasGpsDecimal;
+        const double gpsLat = result->info.gpsLatDecimal;
+        const double gpsLon = result->info.gpsLonDecimal;
 
         CoUninitialize();
         PostMessage(hwnd, WM_DECODE_DONE, 0, reinterpret_cast<LPARAM>(result));
+        result = nullptr;  // sahiplik UI thread'ine geçti
+
+        // ── Aşama 3: Nominatim reverse geocoding (görsel zaten göründü) ─────────
+        if (hasGps && g_decodeGeneration.load() == gen)
+        {
+            auto locName = FetchLocationName(gpsLat, gpsLon);
+            if (!locName.empty() && g_decodeGeneration.load() == gen)
+            {
+                auto* loc           = new LocationResult{};
+                loc->locationName   = std::move(locName);
+                loc->generation     = gen;
+                PostMessage(hwnd, WM_LOCATION_DONE, 0, reinterpret_cast<LPARAM>(loc));
+            }
+        }
     });
 }
 
@@ -173,7 +246,7 @@ static void StartPrefetch(const std::wstring& path, uint64_t cancelToken)
         auto* result = new DecodeResult();
         result->path = path;
 
-        DoDecodeToResult(result);
+        DoDecodeToResult(result, /*fetchLocation=*/false);
 
         CoUninitialize();
 
@@ -659,7 +732,28 @@ static void NavigateTo(HWND hwnd, const std::wstring& path)
             TriggerThumbFetches(hwnd);
             // GPS varsa OSM tile'larını arka planda çek (cache hit yolunda da gerekli)
             if (g_imageInfo.hasGpsDecimal)
+            {
                 StartTileFetches(hwnd, g_imageInfo.gpsLatDecimal, g_imageInfo.gpsLonDecimal);
+                // Prefetch Nominatim yapmadı — cache hit'te arka planda çek
+                if (g_imageInfo.gpsLocationName.empty())
+                {
+                    const uint64_t gen = g_decodeGeneration.load();
+                    const double   lat = g_imageInfo.gpsLatDecimal;
+                    const double   lon = g_imageInfo.gpsLonDecimal;
+                    std::thread([hwnd, lat, lon, gen]()
+                    {
+                        auto locName = FetchLocationName(lat, lon);
+                        if (!locName.empty() && g_decodeGeneration.load() == gen)
+                        {
+                            auto* loc         = new LocationResult{};
+                            loc->locationName = std::move(locName);
+                            loc->generation   = gen;
+                            PostMessage(hwnd, WM_LOCATION_DONE, 0,
+                                        reinterpret_cast<LPARAM>(loc));
+                        }
+                    }).detach();
+                }
+            }
             return;
         }
     }
@@ -1326,18 +1420,51 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         if (result->generation == g_decodeGeneration.load() && g_renderer)
         {
+            // WM_META_DONE GPS'i zaten set ettiyse tile fetch başlatıldı — tekrarlama
+            const bool tilesAlreadyStarted = g_imageInfo.hasGpsDecimal;
+
             ApplyDecodeResult(hwnd, result);
             // Decode tamamlandı — komşuları arka planda yükle
             TriggerPrefetch();
             // Strip slot'larını güncelle (ilk açılışta NavigateTo çağrılmaz, burada yapılır)
             UpdateStripSlots();
             TriggerThumbFetches(hwnd);
-            // GPS varsa OSM tile'larını arka planda çek
-            if (g_imageInfo.hasGpsDecimal)
+            // GPS varsa OSM tile'larını arka planda çek (META_DONE başlatmadıysa)
+            if (g_imageInfo.hasGpsDecimal && !tilesAlreadyStarted)
                 StartTileFetches(hwnd, g_imageInfo.gpsLatDecimal, g_imageInfo.gpsLonDecimal);
         }
 
         delete result;
+        return 0;
+    }
+
+    case WM_META_DONE:
+    {
+        auto* meta = reinterpret_cast<MetaResult*>(lParam);
+        if (meta->generation == g_decodeGeneration.load())
+        {
+            // filename ve fileSizeBytes NavigateTo tarafından zaten set edildi; koru.
+            meta->info.filename      = g_imageInfo.filename;
+            meta->info.fileSizeBytes = g_imageInfo.fileSizeBytes;
+            g_imageInfo = std::move(meta->info);
+            // GPS varsa OSM tile'larını hemen başlat — piksel decode bekleme
+            if (g_imageInfo.hasGpsDecimal)
+                StartTileFetches(hwnd, g_imageInfo.gpsLatDecimal, g_imageInfo.gpsLonDecimal);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        delete meta;
+        return 0;
+    }
+
+    case WM_LOCATION_DONE:
+    {
+        auto* loc = reinterpret_cast<LocationResult*>(lParam);
+        if (loc->generation == g_decodeGeneration.load())
+        {
+            g_imageInfo.gpsLocationName = std::move(loc->locationName);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        delete loc;
         return 0;
     }
 

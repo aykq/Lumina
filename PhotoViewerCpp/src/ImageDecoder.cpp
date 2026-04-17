@@ -534,6 +534,23 @@ static void ParseRawExif(const uint8_t* data, size_t size, DecodeOutput& out)
     }
 }
 
+// ─── ICC profil adı yardımcısı ────────────────────────────────────────────────
+// Ham ICC baytlarından profil açıklama adını döndürür; piksellere dokunmaz.
+static std::wstring IccProfileName(const uint8_t* iccData, size_t iccSize)
+{
+    if (!iccData || iccSize == 0) return {};
+    cmsHPROFILE prof = cmsOpenProfileFromMem(iccData, static_cast<cmsUInt32Number>(iccSize));
+    if (!prof) return {};
+    wchar_t descBuf[256] = {};
+    if (cmsGetProfileInfo(prof, cmsInfoDescription, "tr", "TR", descBuf, 256) == 0)
+        cmsGetProfileInfo(prof, cmsInfoDescription, "en", "US", descBuf, 256);
+    std::wstring name = descBuf;
+    while (!name.empty() && (name.back() == L' ' || name.back() == L'\0'))
+        name.pop_back();
+    cmsCloseProfile(prof);
+    return name;
+}
+
 // EXIF Orientation (1-8) → WICBitmapTransformOptions
 static WICBitmapTransformOptions ExifOrientationToTransform(UINT16 o)
 {
@@ -552,26 +569,14 @@ static WICBitmapTransformOptions ExifOrientationToTransform(UINT16 o)
     }
 }
 
-static bool DecodeWithWIC(const std::wstring& path, DecodeOutput& out)
+// ─── WIC frame metadata okuyucu ──────────────────────────────────────────────
+// EXIF, GPS ve ICC profil bilgilerini frame'den okur; piksellere dokunmaz.
+// orientation: EXIF yönelim değeri (1-8); iccDataOut: piksel dönüşümü için ham ICC baytları.
+static void WicReadFrameMeta(IWICBitmapFrameDecode* frame, DecodeOutput& out,
+                              UINT16& orientation, std::vector<BYTE>& iccDataOut)
 {
-    IWICImagingFactory* wic = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
-                                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))))
-        return false;
+    orientation = 1;
 
-    IWICBitmapDecoder* decoder = nullptr;
-    HRESULT hr = wic->CreateDecoderFromFilename(
-        path.c_str(), nullptr, GENERIC_READ,
-        WICDecodeMetadataCacheOnLoad, &decoder);
-    if (FAILED(hr)) { wic->Release(); return false; }
-
-    IWICBitmapFrameDecode* frame = nullptr;
-    hr = decoder->GetFrame(0, &frame);
-    decoder->Release();
-    if (FAILED(hr)) { wic->Release(); return false; }
-
-    // EXIF metadata + yön okuma
-    UINT16 orientation = 1;
     IWICMetadataQueryReader* mqr = nullptr;
     if (SUCCEEDED(frame->GetMetadataQueryReader(&mqr)) && mqr)
     {
@@ -616,7 +621,6 @@ static bool DecodeWithWIC(const std::wstring& path, DecodeOutput& out)
         if (out.iso.empty()) readIso(L"/ifd/exif/{ushort=34855}");
 
         // GPS koordinatları — JPEG: /app1/ifd/gps/..., TIFF/PNG: /ifd/gps/...
-        // Her iki yol da denenir; ilk başarılı sonuç kullanılır.
         double latDec = 0.0, lonDec = 0.0;
         bool hasLat = WicReadGPSCoord(mqr,
             L"/app1/ifd/gps/{ushort=1}", L"/app1/ifd/gps/{ushort=2}",
@@ -650,9 +654,7 @@ static bool DecodeWithWIC(const std::wstring& path, DecodeOutput& out)
         mqr->Release();
     }
 
-    // ICC renk profili çıkar (ICC transform sonradan manuel uygulanacak)
-    std::vector<BYTE> wicIccData;
-    std::wstring       wicExifColorSpaceName;  // gömülü ICC yoksa EXIF renk alanı adı
+    // ICC renk profili — ham baytları çıkar; profil adını da set et
     {
         IWICColorContext* colorCtx = nullptr;
         UINT numCtx = 0;
@@ -663,32 +665,52 @@ static bool DecodeWithWIC(const std::wstring& path, DecodeOutput& out)
             {
                 if (ctxType == WICColorContextProfile)
                 {
-                    // Gömülü ICC profili: ham baytları al, lcms2 ile sRGB'ye dönüştür
                     UINT profileSize = 0;
                     colorCtx->GetProfileBytes(0, nullptr, &profileSize);
                     if (profileSize > 0)
                     {
-                        wicIccData.resize(profileSize);
-                        colorCtx->GetProfileBytes(profileSize, wicIccData.data(), &profileSize);
+                        iccDataOut.resize(profileSize);
+                        colorCtx->GetProfileBytes(profileSize, iccDataOut.data(), &profileSize);
+                        out.iccProfileName = IccProfileName(iccDataOut.data(), profileSize);
                     }
                 }
                 else if (ctxType == WICColorContextExifColorSpace)
                 {
-                    // EXIF ColorSpace tag ile işaretlenmiş; gömülü ICC yok.
-                    // Değer 1 = sRGB, 65535 = Uncalibrated (genellikle Adobe RGB)
                     UINT exifCS = 0;
                     if (SUCCEEDED(colorCtx->GetExifColorSpace(&exifCS)))
                     {
-                        if (exifCS == 1)
-                            wicExifColorSpaceName = L"sRGB";
-                        else if (exifCS == 65535)
-                            wicExifColorSpaceName = L"Uncalibrated";
+                        if (exifCS == 1)       out.iccProfileName = L"sRGB";
+                        else if (exifCS == 65535) out.iccProfileName = L"Uncalibrated";
                     }
                 }
             }
             colorCtx->Release();
         }
     }
+}
+
+static bool DecodeWithWIC(const std::wstring& path, DecodeOutput& out)
+{
+    IWICImagingFactory* wic = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))))
+        return false;
+
+    IWICBitmapDecoder* decoder = nullptr;
+    HRESULT hr = wic->CreateDecoderFromFilename(
+        path.c_str(), nullptr, GENERIC_READ,
+        WICDecodeMetadataCacheOnLoad, &decoder);
+    if (FAILED(hr)) { wic->Release(); return false; }
+
+    IWICBitmapFrameDecode* frame = nullptr;
+    hr = decoder->GetFrame(0, &frame);
+    decoder->Release();
+    if (FAILED(hr)) { wic->Release(); return false; }
+
+    // EXIF metadata + ICC profili
+    UINT16 orientation = 1;
+    std::vector<BYTE> wicIccData;
+    WicReadFrameMeta(frame, out, orientation, wicIccData);
 
     // Format dönüştürücü: 32bppBGRA (düz alfa) — ICC uygulandıktan sonra manuel premultiply
     IWICFormatConverter* converter = nullptr;
@@ -739,12 +761,10 @@ static bool DecodeWithWIC(const std::wstring& path, DecodeOutput& out)
     if (!out.pixels.empty())
     {
         // ICC dönüşümü (varsa) → sRGB'ye çevir, sonra pre-multiply
+        // out.iccProfileName WicReadFrameMeta tarafından zaten set edildi.
         if (!wicIccData.empty())
-            out.iccProfileName = ApplyIccProfile(
-                out.pixels.data(), out.width, out.height,
-                wicIccData.data(), wicIccData.size());
-        else if (!wicExifColorSpaceName.empty())
-            out.iccProfileName = wicExifColorSpaceName;  // EXIF tag'den gelen isim; piksel dönüşümü yok
+            ApplyIccProfile(out.pixels.data(), out.width, out.height,
+                            wicIccData.data(), wicIccData.size());
         PremultiplyBGRA(out.pixels.data(), out.width, out.height);
     }
 
@@ -758,7 +778,7 @@ static bool DecodeWebP(const std::wstring& path, DecodeOutput& out)
     auto data = ReadFileBytes(path);
     if (data.empty()) return false;
 
-    // ICC profili çıkar (ICCP chunk — WebPDemux ile)
+    // ICC + EXIF chunk'larını çıkar (WebPDemux ile)
     std::vector<uint8_t> webpIccData;
     {
         WebPData rawData = { data.data(), data.size() };
@@ -770,6 +790,12 @@ static bool DecodeWebP(const std::wstring& path, DecodeOutput& out)
             {
                 webpIccData.assign(chunkIter.chunk.bytes,
                                    chunkIter.chunk.bytes + chunkIter.chunk.size);
+                WebPDemuxReleaseChunkIterator(&chunkIter);
+            }
+            // EXIF chunk — kameradan gelen WebP fotoğraflarında bulunur (ör. Android/Pixel)
+            if (WebPDemuxGetChunk(dmx, "EXIF", 1, &chunkIter))
+            {
+                ParseRawExif(chunkIter.chunk.bytes, chunkIter.chunk.size, out);
                 WebPDemuxReleaseChunkIterator(&chunkIter);
             }
             WebPDemuxDelete(dmx);
@@ -854,6 +880,15 @@ static bool DecodeHEIF(const std::wstring& path, DecodeOutput& out)
     if (data.empty()) return false;
 
     heif_context* ctx = heif_context_alloc();
+
+    // Tüm mantıksal işlemci çekirdeklerini decode'a tahsis et
+    {
+        SYSTEM_INFO si{};
+        GetSystemInfo(&si);
+        int nThreads = static_cast<int>(si.dwNumberOfProcessors);
+        if (nThreads < 1) nThreads = 1;
+        heif_context_set_max_decoding_threads(ctx, nThreads);
+    }
 
     // Bellek üzerinden oku (Windows yolu dönüşümü gerekmez)
     heif_error err = heif_context_read_from_memory_without_copy(
@@ -959,7 +994,8 @@ static bool DecodeJXL(const std::wstring& path, DecodeOutput& out)
     if (!dec) return false;
 
     JxlDecoderSubscribeEvents(dec,
-        JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE);
+        JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE
+        | JXL_DEC_BOX);  // JXL container box'larını oku (EXIF için)
     JxlDecoderSetInput(dec, data.data(), data.size());
     JxlDecoderCloseInput(dec);
 
@@ -971,6 +1007,10 @@ static bool DecodeJXL(const std::wstring& path, DecodeOutput& out)
     int  currentDurMs    = 100;
     std::vector<uint8_t> frameBuf;
     std::vector<uint8_t> jxlIccData;
+
+    // EXIF box okuma — kameradan gelen JXL dosyalarında bulunur
+    std::vector<uint8_t> jxlExifBuf;
+    bool inExifBox = false;
 
     for (;;)
     {
@@ -1059,10 +1099,41 @@ static bool DecodeJXL(const std::wstring& path, DecodeOutput& out)
             }
             break;
         }
+        else if (status == JXL_DEC_BOX)
+        {
+            // Önceki EXIF box tamamlandı — buffer'ı serbest bırak ve parse et
+            if (inExifBox && !jxlExifBuf.empty())
+            {
+                size_t rem     = JxlDecoderReleaseBoxBuffer(dec);
+                size_t written = jxlExifBuf.size() - rem;
+                if (written > 0)
+                    ParseRawExif(jxlExifBuf.data(), written, out);
+                inExifBox = false;
+                jxlExifBuf.clear();
+            }
+            // Yeni box: "Exif" ise buffer hazırla
+            JxlBoxType boxType{};
+            if (JxlDecoderGetBoxType(dec, boxType, JXL_FALSE) == JXL_DEC_SUCCESS
+                && memcmp(boxType, "Exif", 4) == 0)
+            {
+                jxlExifBuf.resize(256 * 1024);  // 256 KB — kamera EXIF için yeterli
+                JxlDecoderSetBoxBuffer(dec, jxlExifBuf.data(), jxlExifBuf.size());
+                inExifBox = true;
+            }
+        }
         else if (status == JXL_DEC_ERROR)
         {
             break;
         }
+    }
+
+    // Loop bitmeden tamamlanan son EXIF box (stream aniden biterse)
+    if (inExifBox && !jxlExifBuf.empty())
+    {
+        size_t rem     = JxlDecoderReleaseBoxBuffer(dec);
+        size_t written = jxlExifBuf.size() - rem;
+        if (written > 0)
+            ParseRawExif(jxlExifBuf.data(), written, out);
     }
 
     JxlDecoderDestroy(dec);
@@ -1177,6 +1248,243 @@ static bool DecodeAVIF(const std::wstring& path, DecodeOutput& out)
         PremultiplyBGRA(out.pixels.data(), out.width, out.height);
         return true;
     }
+}
+
+// ─── Format-specific metadata extractor'lar (piksel decode YOK) ──────────────
+// Her fonksiyon sadece container/stream'i açıp EXIF+boyut okur; piksel decode etmez.
+
+static bool ExtractMetaWIC(const std::wstring& path, DecodeOutput& out)
+{
+    IWICImagingFactory* wic = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))))
+        return false;
+
+    IWICBitmapDecoder* decoder = nullptr;
+    HRESULT hr = wic->CreateDecoderFromFilename(
+        path.c_str(), nullptr, GENERIC_READ,
+        WICDecodeMetadataCacheOnLoad, &decoder);
+    if (FAILED(hr)) { wic->Release(); return false; }
+
+    IWICBitmapFrameDecode* frame = nullptr;
+    hr = decoder->GetFrame(0, &frame);
+    decoder->Release();
+    if (FAILED(hr)) { wic->Release(); return false; }
+
+    UINT w = 0, h = 0;
+    frame->GetSize(&w, &h);
+
+    UINT16 orientation = 1;
+    std::vector<BYTE> iccData;
+    WicReadFrameMeta(frame, out, orientation, iccData);
+
+    // 90/270 dönüşünde w ve h yer değiştirir (tam decode ile aynı sonuç)
+    if (orientation == 5 || orientation == 6 || orientation == 7 || orientation == 8)
+        std::swap(w, h);
+    out.width  = w;
+    out.height = h;
+
+    frame->Release();
+    wic->Release();
+    return true;
+}
+
+static bool ExtractMetaWebP(const std::wstring& path, DecodeOutput& out)
+{
+    auto data = ReadFileBytes(path);
+    if (data.empty()) return false;
+
+    WebPData rawData = { data.data(), data.size() };
+    WebPDemuxer* dmx = WebPDemux(&rawData);
+    if (!dmx) return false;
+
+    out.width  = WebPDemuxGetI(dmx, WEBP_FF_CANVAS_WIDTH);
+    out.height = WebPDemuxGetI(dmx, WEBP_FF_CANVAS_HEIGHT);
+
+    WebPChunkIterator chunkIter;
+    // ICC profil adı
+    if (WebPDemuxGetChunk(dmx, "ICCP", 1, &chunkIter))
+    {
+        out.iccProfileName = IccProfileName(chunkIter.chunk.bytes, chunkIter.chunk.size);
+        WebPDemuxReleaseChunkIterator(&chunkIter);
+    }
+    // EXIF
+    if (WebPDemuxGetChunk(dmx, "EXIF", 1, &chunkIter))
+    {
+        ParseRawExif(chunkIter.chunk.bytes, chunkIter.chunk.size, out);
+        WebPDemuxReleaseChunkIterator(&chunkIter);
+    }
+
+    WebPDemuxDelete(dmx);
+    return out.width > 0;
+}
+
+static bool ExtractMetaHEIF(const std::wstring& path, DecodeOutput& out)
+{
+    auto data = ReadFileBytes(path);
+    if (data.empty()) return false;
+
+    heif_context* ctx = heif_context_alloc();
+    heif_error err = heif_context_read_from_memory_without_copy(
+        ctx, data.data(), data.size(), nullptr);
+    if (err.code != heif_error_Ok) { heif_context_free(ctx); return false; }
+
+    heif_image_handle* handle = nullptr;
+    err = heif_context_get_primary_image_handle(ctx, &handle);
+    if (err.code != heif_error_Ok) { heif_context_free(ctx); return false; }
+
+    // Boyutlar (piksel decode gerektirmez)
+    out.width  = static_cast<UINT>(heif_image_handle_get_width(handle));
+    out.height = static_cast<UINT>(heif_image_handle_get_height(handle));
+
+    // ICC profil adı
+    heif_color_profile_type cpType = heif_image_handle_get_color_profile_type(handle);
+    if (cpType == heif_color_profile_type_rICC || cpType == heif_color_profile_type_prof)
+    {
+        size_t sz = heif_image_handle_get_raw_color_profile_size(handle);
+        if (sz > 0)
+        {
+            std::vector<uint8_t> icc(sz);
+            heif_image_handle_get_raw_color_profile(handle, icc.data());
+            out.iccProfileName = IccProfileName(icc.data(), sz);
+        }
+    }
+
+    // EXIF
+    int nMeta = heif_image_handle_get_number_of_metadata_blocks(handle, "Exif");
+    if (nMeta > 0)
+    {
+        heif_item_id metaId;
+        heif_image_handle_get_list_of_metadata_block_IDs(handle, "Exif", &metaId, 1);
+        size_t exifSz = heif_image_handle_get_metadata_size(handle, metaId);
+        if (exifSz > 0)
+        {
+            std::vector<uint8_t> exifBuf(exifSz);
+            if (heif_image_handle_get_metadata(handle, metaId, exifBuf.data()).code
+                == heif_error_Ok)
+                ParseRawExif(exifBuf.data(), exifSz, out);
+        }
+    }
+
+    heif_image_handle_release(handle);
+    heif_context_free(ctx);
+    return out.width > 0;
+}
+
+static bool ExtractMetaJXL(const std::wstring& path, DecodeOutput& out)
+{
+    auto data = ReadFileBytes(path);
+    if (data.empty()) return false;
+
+    JxlDecoder* dec = JxlDecoderCreate(nullptr);
+    if (!dec) return false;
+
+    // Yalnızca temel bilgi ve EXIF box — piksel olaylarına abone olmaz
+    JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_BOX);
+    JxlDecoderSetInput(dec, data.data(), data.size());
+    JxlDecoderCloseInput(dec);
+
+    std::vector<uint8_t> jxlExifBuf;
+    bool inExifBox = false;
+
+    for (;;)
+    {
+        JxlDecoderStatus status = JxlDecoderProcessInput(dec);
+
+        if (status == JXL_DEC_BASIC_INFO)
+        {
+            JxlBasicInfo basicInfo{};
+            if (JxlDecoderGetBasicInfo(dec, &basicInfo) == JXL_DEC_SUCCESS)
+            {
+                out.width  = basicInfo.xsize;
+                out.height = basicInfo.ysize;
+            }
+        }
+        else if (status == JXL_DEC_BOX)
+        {
+            if (inExifBox && !jxlExifBuf.empty())
+            {
+                size_t rem     = JxlDecoderReleaseBoxBuffer(dec);
+                size_t written = jxlExifBuf.size() - rem;
+                if (written > 0)
+                    ParseRawExif(jxlExifBuf.data(), written, out);
+                inExifBox = false;
+                jxlExifBuf.clear();
+            }
+            JxlBoxType boxType{};
+            if (JxlDecoderGetBoxType(dec, boxType, JXL_FALSE) == JXL_DEC_SUCCESS
+                && memcmp(boxType, "Exif", 4) == 0)
+            {
+                jxlExifBuf.resize(256 * 1024);
+                JxlDecoderSetBoxBuffer(dec, jxlExifBuf.data(), jxlExifBuf.size());
+                inExifBox = true;
+            }
+        }
+        else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER
+              || status == JXL_DEC_SUCCESS
+              || status == JXL_DEC_ERROR)
+        {
+            break;  // piksel decode istemeden dur
+        }
+    }
+
+    if (inExifBox && !jxlExifBuf.empty())
+    {
+        size_t rem     = JxlDecoderReleaseBoxBuffer(dec);
+        size_t written = jxlExifBuf.size() - rem;
+        if (written > 0)
+            ParseRawExif(jxlExifBuf.data(), written, out);
+    }
+
+    JxlDecoderDestroy(dec);
+    return out.width > 0;
+}
+
+static bool ExtractMetaAVIF(const std::wstring& path, DecodeOutput& out)
+{
+    auto data = ReadFileBytes(path);
+    if (data.empty()) return false;
+
+    avifDecoder* decoder = avifDecoderCreate();
+    if (!decoder) return false;
+
+    bool ok = (avifDecoderSetIOMemory(decoder, data.data(), data.size()) == AVIF_RESULT_OK
+            && avifDecoderParse(decoder) == AVIF_RESULT_OK);
+
+    if (ok && decoder->image)
+    {
+        out.width  = decoder->image->width;
+        out.height = decoder->image->height;
+        if (decoder->image->exif.size > 0)
+            ParseRawExif(decoder->image->exif.data, decoder->image->exif.size, out);
+        if (decoder->image->icc.size > 0)
+            out.iccProfileName = IccProfileName(decoder->image->icc.data,
+                                                decoder->image->icc.size);
+    }
+
+    avifDecoderDestroy(decoder);
+    return ok && out.width > 0;
+}
+
+// ─── Metadata-only dispatch ────────────────────────────────────────────────────
+// Piksel decode etmeden sadece EXIF/GPS/boyut bilgilerini doldurur.
+// WM_META_DONE aşaması için çağrılır; tam DecodeImage'dan ~10-20× daha hızlı.
+bool ExtractImageMeta(const std::wstring& path, DecodeOutput& out)
+{
+    auto dot = path.rfind(L'.');
+    std::wstring ext;
+    if (dot != std::wstring::npos)
+    {
+        ext = path.substr(dot + 1);
+        for (auto& c : ext) c = towupper(c);
+    }
+    out.format = (ext == L"JPG") ? L"JPEG" : ext;
+
+    if (ext == L"WEBP")              return ExtractMetaWebP(path, out);
+    if (ext == L"HEIC" || ext == L"HEIF") return ExtractMetaHEIF(path, out);
+    if (ext == L"JXL")               return ExtractMetaJXL(path, out);
+    if (ext == L"AVIF")              return ExtractMetaAVIF(path, out);
+    return ExtractMetaWIC(path, out);  // JPEG, PNG, BMP, GIF, TIFF, ICO
 }
 
 // ─── Nominatim reverse geocoding ─────────────────────────────────────────────
@@ -1312,10 +1620,6 @@ bool DecodeImage(const std::wstring& path, DecodeOutput& out)
         ok = DecodeAVIF(path, out);
     else
         ok = DecodeWithWIC(path, out);  // JPEG, PNG, BMP, GIF, TIFF, ICO
-
-    // GPS koordinatları varsa konum adını çek (Nominatim reverse geocoding)
-    if (ok && out.hasGpsDecimal)
-        out.gpsLocationName = FetchLocationName(out.gpsLatDecimal, out.gpsLonDecimal);
 
     return ok;
 }

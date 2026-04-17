@@ -49,6 +49,12 @@ struct DecodeOutput
 // Başarılıysa true döner ve out.pixels dolu olur.
 bool DecodeImage(const std::wstring& path, DecodeOutput& out);
 
+// Piksel decode YAPMADAN sadece metadata alanlarını doldurur:
+// width, height, format, dateTaken, cameraMake, cameraModel, aperture,
+// shutterSpeed, iso, GPS alanları, iccProfileName.
+// DecodeImage'dan ~10-20× daha hızlı; info paneli için WM_META_DONE aşamasında kullanılır.
+bool ExtractImageMeta(const std::wstring& path, DecodeOutput& out);
+
 // Thumbnail için optimize edilmiş decode: metadata atlanır, WIC scaler pipeline kullanılır.
 // JPEG/PNG/BMP/TIFF/GIF/ICO için büyük buffer tahsis etmeden doğrudan hedef boyuta ölçekler.
 // WebP/HEIC/JXL/AVIF için tam decode + ölçekleme yedek yolu kullanılır.

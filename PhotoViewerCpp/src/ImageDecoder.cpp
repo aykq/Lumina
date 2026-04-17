@@ -14,9 +14,11 @@
 #include <libheif/heif.h>
 #include <jxl/decode.h>
 #include <jxl/codestream_header.h>
+#include <jxl/thread_parallel_runner.h>
 #include <avif/avif.h>
 
 #pragma comment(lib, "libwebpdemux.lib")
+#pragma comment(lib, "jxl_threads.lib")
 
 #pragma warning(push)
 #pragma warning(disable: 5033)  // lcms2: 'register' C++17'de kaldırıldı
@@ -29,7 +31,8 @@
 static std::vector<uint8_t> ReadFileBytes(const std::wstring& path)
 {
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                               nullptr, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return {};
 
     LARGE_INTEGER fileSize{};
@@ -79,6 +82,31 @@ static void SwapRB(uint8_t* pixels, UINT width, UINT height)
         const uint8_t tmp = p[0];
         p[0] = p[2];
         p[2] = tmp;
+    }
+}
+
+// RGBA → BGRA + pre-multiply tek geçişte (SwapRB + Premultiply ayrı iki passtan daha hızlı).
+// ICC profili gerektirmeyen HEIC/JXL için kullanılır; cache bandwidth yarıya iner.
+static void SwapRBAndPremultiply(uint8_t* pixels, UINT width, UINT height)
+{
+    const UINT count = width * height;
+    for (UINT i = 0; i < count; i++)
+    {
+        uint8_t* p = pixels + i * 4;
+        const uint32_t a = p[3];
+        const uint8_t  r = p[0];   // RGBA'da R
+        const uint8_t  b = p[2];   // RGBA'da B
+        if (a < 255)
+        {
+            p[0] = static_cast<uint8_t>((b * a + 127) / 255);   // BGRA B = premul(B_src)
+            p[1] = static_cast<uint8_t>((p[1] * a + 127) / 255);
+            p[2] = static_cast<uint8_t>((r * a + 127) / 255);   // BGRA R = premul(R_src)
+        }
+        else
+        {
+            p[0] = b;   // opak: sadece swap
+            p[2] = r;
+        }
     }
 }
 
@@ -973,13 +1001,21 @@ static bool DecodeHEIF(const std::wstring& path, DecodeOutput& out)
     heif_image_handle_release(handle);
     heif_context_free(ctx);
 
-    // libheif RGBA döner — BGRA'ya çevir, ICC uygula, sonra pre-multiply
-    SwapRB(out.pixels.data(), out.width, out.height);
+    // libheif RGBA döner — BGRA + premultiply
     if (!heifIccData.empty())
+    {
+        // ICC straight alpha'ya uygulanmalı; önce swap, sonra ICC, sonra premultiply
+        SwapRB(out.pixels.data(), out.width, out.height);
         out.iccProfileName = ApplyIccProfile(
             out.pixels.data(), out.width, out.height,
             heifIccData.data(), heifIccData.size());
-    PremultiplyBGRA(out.pixels.data(), out.width, out.height);
+        PremultiplyBGRA(out.pixels.data(), out.width, out.height);
+    }
+    else
+    {
+        // ICC yok: tek geçişte RGBA→BGRA + premultiply (daha az bellek bandwith)
+        SwapRBAndPremultiply(out.pixels.data(), out.width, out.height);
+    }
     return true;
 }
 
@@ -990,8 +1026,17 @@ static bool DecodeJXL(const std::wstring& path, DecodeOutput& out)
     auto data = ReadFileBytes(path);
     if (data.empty()) return false;
 
+    // Tüm mantıksal çekirdekleri decode'a tahsis et
+    SYSTEM_INFO jxlSi{};
+    GetSystemInfo(&jxlSi);
+    const size_t nJxlThreads = jxlSi.dwNumberOfProcessors > 0
+                                   ? static_cast<size_t>(jxlSi.dwNumberOfProcessors) : 1;
+    void* jxlRunner = JxlThreadParallelRunnerCreate(nullptr, nJxlThreads);
+
     JxlDecoder* dec = JxlDecoderCreate(nullptr);
-    if (!dec) return false;
+    if (!dec) { JxlThreadParallelRunnerDestroy(jxlRunner); return false; }
+
+    JxlDecoderSetParallelRunner(dec, JxlThreadParallelRunner, jxlRunner);
 
     JxlDecoderSubscribeEvents(dec,
         JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FRAME | JXL_DEC_FULL_IMAGE
@@ -1137,18 +1182,25 @@ static bool DecodeJXL(const std::wstring& path, DecodeOutput& out)
     }
 
     JxlDecoderDestroy(dec);
+    JxlThreadParallelRunnerDestroy(jxlRunner);
 
     if (!success) { out.pixels.clear(); out.frames.clear(); return false; }
 
     if (!isAnimated)
     {
-        // Statik JXL: RGBA → BGRA, ICC uygula, pre-multiply
-        SwapRB(out.pixels.data(), out.width, out.height);
+        // Statik JXL: RGBA → BGRA + premultiply
         if (!jxlIccData.empty())
+        {
+            SwapRB(out.pixels.data(), out.width, out.height);
             out.iccProfileName = ApplyIccProfile(
                 out.pixels.data(), out.width, out.height,
                 jxlIccData.data(), jxlIccData.size());
-        PremultiplyBGRA(out.pixels.data(), out.width, out.height);
+            PremultiplyBGRA(out.pixels.data(), out.width, out.height);
+        }
+        else
+        {
+            SwapRBAndPremultiply(out.pixels.data(), out.width, out.height);
+        }
     }
     return true;
 }
@@ -1187,6 +1239,14 @@ static bool DecodeAVIF(const std::wstring& path, DecodeOutput& out)
 
     avifDecoder* decoder = avifDecoderCreate();
     if (!decoder) return false;
+
+    // Tüm mantıksal çekirdekleri kullan
+    {
+        SYSTEM_INFO avifSi{};
+        GetSystemInfo(&avifSi);
+        decoder->maxThreads = static_cast<int>(avifSi.dwNumberOfProcessors);
+        if (decoder->maxThreads < 1) decoder->maxThreads = 1;
+    }
 
     if (avifDecoderSetIOMemory(decoder, data.data(), data.size()) != AVIF_RESULT_OK
         || avifDecoderParse(decoder) != AVIF_RESULT_OK)

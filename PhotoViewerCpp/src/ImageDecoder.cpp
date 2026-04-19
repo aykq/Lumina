@@ -1820,16 +1820,60 @@ static bool DecodeThumbWithWIC(const std::wstring& path, UINT targetH,
     return true;
 }
 
+static void ScalePixelsNN(const std::vector<uint8_t>& src, UINT srcW, UINT srcH,
+                           std::vector<uint8_t>& dst, UINT dstW, UINT dstH)
+{
+    dst.resize(static_cast<size_t>(dstW) * dstH * 4);
+    for (UINT dy = 0; dy < dstH; ++dy) {
+        UINT sy = dy * srcH / dstH;
+        for (UINT dx = 0; dx < dstW; ++dx) {
+            UINT sx = dx * srcW / dstW;
+            const uint8_t* s = src.data() + (sy * srcW + sx) * 4;
+            uint8_t* d = dst.data() + (dy * dstW + dx) * 4;
+            d[0]=s[0]; d[1]=s[1]; d[2]=s[2]; d[3]=s[3];
+        }
+    }
+}
+
 bool DecodeImageForThumbnail(const std::wstring& path, UINT targetH,
                               std::vector<uint8_t>& pixelsOut,
                               UINT& widthOut, UINT& heightOut)
 {
     // WIC hızlı yolu (JPEG, PNG, BMP, TIFF, GIF, ICO)
-    // Desteklenmeyen formatlarda (WebP, HEIC, JXL, AVIF) false döner → yedek yol
     if (DecodeThumbWithWIC(path, targetH, pixelsOut, widthOut, heightOut))
         return true;
 
-    // Yedek: tam decode + nearest-neighbor ölçekleme (WebP, HEIC, JXL, AVIF)
+    // HEIC/HEIF: gömülü thumbnail (~5-20ms), tam decode yerine kullan (~100-200ms)
+    // Explorer hover'da yeni GetThumbnail çağrısı yapar; yavaş decode timeout'a girip
+    // cache'deki thumbnail'i siler. Embedded thumb bunu önler.
+    {
+        size_t dot = path.rfind(L'.');
+        if (dot != std::wstring::npos) {
+            std::wstring ext = path.substr(dot);
+            for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
+            if (ext == L".heic" || ext == L".heif") {
+                std::vector<uint8_t> embPixels;
+                UINT embW = 0, embH = 0;
+                if (ExtractHEICEmbeddedPreview(path, embPixels, embW, embH) &&
+                    embW > 0 && embH > 0)
+                {
+                    if (embH <= targetH) {
+                        pixelsOut = std::move(embPixels);
+                        widthOut = embW; heightOut = embH;
+                        return true;
+                    }
+                    UINT dstH = targetH;
+                    UINT dstW = embW * dstH / embH;
+                    if (dstW < 1) dstW = 1;
+                    ScalePixelsNN(embPixels, embW, embH, pixelsOut, dstW, dstH);
+                    widthOut = dstW; heightOut = dstH;
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Yedek: tam decode + nearest-neighbor ölçekleme (WebP, JXL, AVIF, gömülü thumb'sız HEIC)
     DecodeOutput decoded;
     if (!DecodeImage(path, decoded)) return false;
 
@@ -1853,18 +1897,8 @@ bool DecodeImageForThumbnail(const std::wstring& path, UINT targetH,
     UINT dstW = srcW * dstH / srcH;
     if (dstW < 1) dstW = 1;
 
-    pixelsOut.resize(static_cast<size_t>(dstW) * dstH * 4);
-    for (UINT dy = 0; dy < dstH; ++dy)
-    {
-        UINT sy = dy * srcH / dstH;
-        for (UINT dx = 0; dx < dstW; ++dx)
-        {
-            UINT sx = dx * srcW / dstW;
-            const uint8_t* s = srcPixels + (sy * srcW + sx) * 4;
-            uint8_t*       d = pixelsOut.data() + (dy * dstW + dx) * 4;
-            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
-        }
-    }
+    std::vector<uint8_t> srcVec(srcPixels, srcPixels + static_cast<size_t>(srcW) * srcH * 4);
+    ScalePixelsNN(srcVec, srcW, srcH, pixelsOut, dstW, dstH);
 
     widthOut  = dstW;
     heightOut = dstH;

@@ -368,3 +368,4 @@ memory-bank/
 AGENTS.md
 .claude/settings.local.json
 PhotoViewerCpp/vcpkg_installed/
+PhotoViewerShell/vcpkg_installed/

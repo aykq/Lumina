@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 'dbbd673624c057174dd51ef85758951032717715'
+
+      - name: Integrate vcpkg with MSBuild
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT\vcpkg.exe" integrate install
+
+      - name: Build LuminaCpp
+        shell: pwsh
+        run: |
+          msbuild LuminaCpp\LuminaCpp.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /m
+
+      - name: Build LuminaShell
+        shell: pwsh
+        run: |
+          msbuild LuminaShell\LuminaShell.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /m
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc /DAppVersion="${{ steps.version.outputs.VERSION }}" installer\lumina.iss
+
+      - name: Install WiX Toolset v4
+        shell: pwsh
+        run: dotnet tool install --global wix
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.VERSION }}"
+          wix build installer\lumina.wxs `
+            -d Version="$ver" `
+            -o "installer\output\Lumina-$ver-x64.msi"
+
+      - name: Create Portable ZIP
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.version.outputs.VERSION }}"
+          New-Item -ItemType Directory -Force -Path "installer\output" | Out-Null
+          Compress-Archive `
+            -Path "x64\Release\LuminaCpp.exe",
+                  "x64\Release\LuminaShell.dll",
+                  "installer\PORTABLE_README.txt" `
+            -DestinationPath "installer\output\Lumina-$ver-x64-Portable.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Lumina v${{ steps.version.outputs.VERSION }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            installer/output/Lumina-*-x64-Setup.exe
+            installer/output/Lumina-*-x64.msi
+            installer/output/Lumina-*-x64-Portable.zip

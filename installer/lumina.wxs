@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v4 MSI for Lumina
+  Build: wix build installer\lumina.wxs -d Version=1.0.0 -o installer\output\Lumina-1.0.0-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package
+    Name="Lumina"
+    Version="$(var.Version)"
+    Manufacturer="Lumina"
+    UpgradeCode="C7D8E9F0-A1B2-4C3D-8E4F-5A6B7C8D9E0F"
+    Language="1033"
+    Codepage="1252"
+    InstallerVersion="500">
+
+    <SummaryInformation Description="Lumina Image Viewer" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Lumina is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- ── Directory structure ─────────────────────────────────────────── -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Lumina" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="LuminaMenuFolder" Name="Lumina" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder" />
+
+    <!-- ── Features ────────────────────────────────────────────────────── -->
+    <Feature Id="MainApp" Title="Lumina" Level="1">
+      <ComponentRef Id="AppExe" />
+      <ComponentRef Id="ShellDll" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="FileAssociations" />
+    </Feature>
+
+    <!-- ── Components ──────────────────────────────────────────────────── -->
+
+    <!-- Main executable -->
+    <Component Id="AppExe" Directory="INSTALLFOLDER" Guid="A1B2C3D4-E5F6-4789-A0B1-C2D3E4F5A6B7">
+      <File Id="LuminaCpp" Source="..\x64\Release\LuminaCpp.exe" KeyPath="yes" />
+    </Component>
+
+    <!-- Shell thumbnail handler DLL + COM registration -->
+    <Component Id="ShellDll" Directory="INSTALLFOLDER" Guid="B2C3D4E5-F6A7-4890-B1C2-D3E4F5A6B7C8">
+      <File Id="LuminaShell" Source="..\x64\Release\LuminaShell.dll" KeyPath="yes" />
+
+      <!-- CLSID: {3C7F5A2D-4B8E-4F5C-A1B2-3C4D5E6F7A8B} -->
+      <RegistryValue Root="HKLM"
+        Key="SOFTWARE\Classes\CLSID\{3C7F5A2D-4B8E-4F5C-A1B2-3C4D5E6F7A8B}"
+        Value="Lumina Thumbnail Handler" Type="string" />
+      <RegistryValue Root="HKLM"
+        Key="SOFTWARE\Classes\CLSID\{3C7F5A2D-4B8E-4F5C-A1B2-3C4D5E6F7A8B}\InprocServer32"
+        Value="[INSTALLFOLDER]LuminaShell.dll" Type="string" />
+      <RegistryValue Root="HKLM"
+        Key="SOFTWARE\Classes\CLSID\{3C7F5A2D-4B8E-4F5C-A1B2-3C4D5E6F7A8B}\InprocServer32"
+        Name="ThreadingModel" Value="Both" Type="string" />
+
+      <!-- Shell Extensions Approved -->
+      <RegistryValue Root="HKLM"
+        Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved"
+        Name="{3C7F5A2D-4B8E-4F5C-A1B2-3C4D5E6F7A8B}"
+        Value="Lumina Thumbnail Handler" Type="string" />
+
+      <!-- Thumbnail handler registration for each extension -->
+      <!-- Thumbnail handler interface GUID: {E357FCCD-A995-4576-B01F-234630154E96} -->
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.heic\PerceivedType" Value="image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.heic\shellex\{E357FCCD-A995-4576-B01F-234630154E96}" Value="{3C7F5A2D-4B8E-4F5C-A1B2-3C4D5E6F7A8B}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.heif\PerceivedType" Value="image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.heif\shellex\{E357FCCD-A995-4576-B01F-234630154E96}" Value="{3C7F5A2D-4B8E-4F5C-A1B2-3C4D5E6F7A8B}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.jxl\PerceivedType"  Value="image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.jxl\shellex\{E357FCCD-A995-4576-B01F-234630154E96}"  Value="{3C7F5A2D-4B8E-4F5C-A1B2-3C4D5E6F7A8B}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.avif\PerceivedType" Value="image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.avif\shellex\{E357FCCD-A995-4576-B01F-234630154E96}" Value="{3C7F5A2D-4B8E-4F5C-A1B2-3C4D5E6F7A8B}" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.webp\PerceivedType" Value="image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.webp\shellex\{E357FCCD-A995-4576-B01F-234630154E96}" Value="{3C7F5A2D-4B8E-4F5C-A1B2-3C4D5E6F7A8B}" Type="string" />
+    </Component>
+
+    <!-- Start Menu shortcut -->
+    <Component Id="StartMenuShortcut" Directory="LuminaMenuFolder" Guid="C3D4E5F6-A7B8-4901-C2D3-E4F5A6B7C8D9">
+      <Shortcut Id="StartMenu" Name="Lumina" Target="[INSTALLFOLDER]LuminaCpp.exe" WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveLuminaMenu" Directory="LuminaMenuFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\Lumina\Install" Name="StartMenu" Value="1" Type="integer" KeyPath="yes" />
+    </Component>
+
+    <!-- Desktop shortcut -->
+    <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="D4E5F6A7-B8C9-4012-D3E4-F5A6B7C8D9E0">
+      <Shortcut Id="Desktop" Name="Lumina" Target="[INSTALLFOLDER]LuminaCpp.exe" WorkingDirectory="INSTALLFOLDER" />
+      <RegistryValue Root="HKCU" Key="Software\Lumina\Install" Name="Desktop" Value="1" Type="integer" KeyPath="yes" />
+    </Component>
+
+    <!-- File associations (OpenWithProgids — non-invasive) -->
+    <Component Id="FileAssociations" Directory="INSTALLFOLDER" Guid="E5F6A7B8-C9D0-4123-E4F5-A6B7C8D9E0F1">
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.JPG" Value="JPEG Image" Type="string" KeyPath="yes" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.JPG\DefaultIcon" Value="[INSTALLFOLDER]LuminaCpp.exe,0" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.JPG\shell\open\command" Value="&quot;[INSTALLFOLDER]LuminaCpp.exe&quot; &quot;%1&quot;" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.jpg\OpenWithProgids"  Name="Lumina.Image.JPG"  Value="" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.jpeg\OpenWithProgids" Name="Lumina.Image.JPG"  Value="" Type="string" />
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.PNG" Value="PNG Image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.PNG\DefaultIcon" Value="[INSTALLFOLDER]LuminaCpp.exe,0" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.PNG\shell\open\command" Value="&quot;[INSTALLFOLDER]LuminaCpp.exe&quot; &quot;%1&quot;" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.png\OpenWithProgids" Name="Lumina.Image.PNG" Value="" Type="string" />
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.GIF" Value="GIF Image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.GIF\DefaultIcon" Value="[INSTALLFOLDER]LuminaCpp.exe,0" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.GIF\shell\open\command" Value="&quot;[INSTALLFOLDER]LuminaCpp.exe&quot; &quot;%1&quot;" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.gif\OpenWithProgids" Name="Lumina.Image.GIF" Value="" Type="string" />
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.BMP" Value="Bitmap Image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.BMP\DefaultIcon" Value="[INSTALLFOLDER]LuminaCpp.exe,0" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.BMP\shell\open\command" Value="&quot;[INSTALLFOLDER]LuminaCpp.exe&quot; &quot;%1&quot;" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.bmp\OpenWithProgids" Name="Lumina.Image.BMP" Value="" Type="string" />
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.TIFF" Value="TIFF Image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.TIFF\DefaultIcon" Value="[INSTALLFOLDER]LuminaCpp.exe,0" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.TIFF\shell\open\command" Value="&quot;[INSTALLFOLDER]LuminaCpp.exe&quot; &quot;%1&quot;" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.tiff\OpenWithProgids" Name="Lumina.Image.TIFF" Value="" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.tif\OpenWithProgids"  Name="Lumina.Image.TIFF" Value="" Type="string" />
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.ICO" Value="Icon File" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.ICO\DefaultIcon" Value="[INSTALLFOLDER]LuminaCpp.exe,0" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.ICO\shell\open\command" Value="&quot;[INSTALLFOLDER]LuminaCpp.exe&quot; &quot;%1&quot;" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.ico\OpenWithProgids" Name="Lumina.Image.ICO" Value="" Type="string" />
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.WEBP" Value="WebP Image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.WEBP\DefaultIcon" Value="[INSTALLFOLDER]LuminaCpp.exe,0" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.WEBP\shell\open\command" Value="&quot;[INSTALLFOLDER]LuminaCpp.exe&quot; &quot;%1&quot;" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.webp\OpenWithProgids" Name="Lumina.Image.WEBP" Value="" Type="string" />
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.HEIC" Value="HEIC Image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.HEIC\DefaultIcon" Value="[INSTALLFOLDER]LuminaCpp.exe,0" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.HEIC\shell\open\command" Value="&quot;[INSTALLFOLDER]LuminaCpp.exe&quot; &quot;%1&quot;" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.heic\OpenWithProgids" Name="Lumina.Image.HEIC" Value="" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.heif\OpenWithProgids" Name="Lumina.Image.HEIC" Value="" Type="string" />
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.AVIF" Value="AVIF Image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.AVIF\DefaultIcon" Value="[INSTALLFOLDER]LuminaCpp.exe,0" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.AVIF\shell\open\command" Value="&quot;[INSTALLFOLDER]LuminaCpp.exe&quot; &quot;%1&quot;" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.avif\OpenWithProgids" Name="Lumina.Image.AVIF" Value="" Type="string" />
+
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.JXL" Value="JPEG XL Image" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.JXL\DefaultIcon" Value="[INSTALLFOLDER]LuminaCpp.exe,0" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\Lumina.Image.JXL\shell\open\command" Value="&quot;[INSTALLFOLDER]LuminaCpp.exe&quot; &quot;%1&quot;" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Classes\.jxl\OpenWithProgids" Name="Lumina.Image.JXL" Value="" Type="string" />
+
+      <!-- Registered Applications capability -->
+      <RegistryValue Root="HKLM" Key="SOFTWARE\RegisteredApplications" Name="Lumina" Value="SOFTWARE\Lumina\Capabilities" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities" Name="ApplicationName" Value="Lumina" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities" Name="ApplicationDescription" Value="Fast native image viewer" Type="string" />
+    </Component>
+
+  </Package>
+</Wix>

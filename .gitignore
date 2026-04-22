@@ -372,3 +372,6 @@ LuminaShell/vcpkg_installed/
 
 # Local dev scripts (icon generation etc.)
 scripts/
+
+# Installer build output
+installer/output/

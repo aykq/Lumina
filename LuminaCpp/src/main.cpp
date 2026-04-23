@@ -3,6 +3,12 @@
 #include <shellapi.h>   // CommandLineToArgvW
 #include <mmsystem.h>   // timeBeginPeriod / timeEndPeriod
 #pragma comment(lib, "winmm.lib")
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
 #include <string>
 #include <cmath>           // fabsf, expf
 #include <thread>          // std::thread
@@ -874,6 +880,26 @@ static void ShowZoomIndicator(HWND hwnd)
     SetTimer(hwnd, kZoomIndicatorTimerID, 1500, nullptr);
 }
 
+// --- Tema yardımcıları ---
+
+static bool IsSystemDarkMode()
+{
+    DWORD value = 1; // varsayılan: açık tema
+    DWORD size  = sizeof(value);
+    RegGetValueW(
+        HKEY_CURRENT_USER,
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        L"AppsUseLightTheme",
+        RRF_RT_REG_DWORD, nullptr, &value, &size);
+    return value == 0; // 0 = koyu tema
+}
+
+static void ApplyTitleBarTheme(HWND hwnd)
+{
+    BOOL dark = IsSystemDarkMode() ? TRUE : FALSE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+}
+
 // --- WndProc ---
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -882,6 +908,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
     case WM_CREATE:
         g_renderer = new Renderer(hwnd);
+        ApplyTitleBarTheme(hwnd);
         return 0;
 
     case WM_PAINT:
@@ -1581,6 +1608,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         delete result;
         return 0;
     }
+
+    case WM_SETTINGCHANGE:
+        if (lParam && lstrcmpW(reinterpret_cast<LPCWSTR>(lParam), L"ImmersiveColorSet") == 0)
+            ApplyTitleBarTheme(hwnd);
+        return 0;
 
     case WM_DESTROY:
         SaveWindowPlacement(hwnd);

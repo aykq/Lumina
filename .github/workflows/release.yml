@@ -40,6 +40,7 @@ jobs:
           msbuild LuminaCpp\LuminaCpp.vcxproj `
             /p:Configuration=Release `
             /p:Platform=x64 `
+            "/p:SolutionDir=$env:GITHUB_WORKSPACE\" `
             /m
 
       - name: Build LuminaShell
@@ -48,6 +49,7 @@ jobs:
           msbuild LuminaShell\LuminaShell.vcxproj `
             /p:Configuration=Release `
             /p:Platform=x64 `
+            "/p:SolutionDir=$env:GITHUB_WORKSPACE\" `
             /m
 
       - name: Build Inno Setup installer

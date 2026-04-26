@@ -66,6 +66,8 @@ public:
                 return StrCmpLogicalW(a.c_str(), b.c_str()) < 0;
             });
 
+        m_directory = dir;
+
         // Başlangıç dosyasının sıralı listedeki indeksini bul
         for (int i = 0; i < static_cast<int>(m_files.size()); ++i)
         {
@@ -80,6 +82,73 @@ public:
     bool empty() const { return m_files.empty(); }
     int  total() const { return static_cast<int>(m_files.size()); }
     int  index() const { return m_index; }
+
+    const std::wstring& directory() const { return m_directory; }
+
+    // Dizini yeniden tara — mevcut konumu korumaya çalışır, silinmişse en yakın dosyaya konumlanır.
+    // Yeni mevcut dosya yolunu döner (klasör boşsa boş string).
+    std::wstring refresh()
+    {
+        if (m_directory.empty()) return {};
+
+        std::wstring current = m_files.empty() ? L"" : m_files[m_index];
+
+        static const wchar_t* kExts[] = {
+            L".jpg", L".jpeg", L".png", L".bmp", L".gif",
+            L".tiff", L".tif", L".ico", L".webp",
+            L".heic", L".heif", L".jxl", L".avif"
+        };
+
+        std::wstring pattern = m_directory + L"\\*";
+        WIN32_FIND_DATAW fd{};
+        HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
+
+        m_files.clear();
+
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                std::wstring name = fd.cFileName;
+                auto dotPos = name.rfind(L'.');
+                if (dotPos == std::wstring::npos) continue;
+                std::wstring ext = name.substr(dotPos);
+                for (auto& c : ext) c = towlower(c);
+                for (auto kExt : kExts)
+                {
+                    if (ext == kExt)
+                    {
+                        m_files.push_back(m_directory + L"\\" + name);
+                        break;
+                    }
+                }
+            } while (FindNextFileW(hFind, &fd));
+            FindClose(hFind);
+
+            std::sort(m_files.begin(), m_files.end(),
+                [](const std::wstring& a, const std::wstring& b) {
+                    return StrCmpLogicalW(a.c_str(), b.c_str()) < 0;
+                });
+        }
+
+        if (m_files.empty()) return {};
+
+        // Mevcut dosyayı yeni listede ara
+        for (int i = 0; i < static_cast<int>(m_files.size()); ++i)
+        {
+            if (_wcsicmp(m_files[i].c_str(), current.c_str()) == 0)
+            {
+                m_index = i;
+                return m_files[m_index];
+            }
+        }
+
+        // Bulunamadı (silindi) — eski indekse en yakın konuma git
+        if (m_index >= static_cast<int>(m_files.size()))
+            m_index = static_cast<int>(m_files.size()) - 1;
+        if (m_index < 0) m_index = 0;
+        return m_files[m_index];
+    }
 
     // İndeksi değiştirmeden sonraki/önceki dosya yolunu döner (prefetch için)
     const std::wstring& peek_next() const
@@ -155,4 +224,5 @@ public:
 private:
     std::vector<std::wstring> m_files;
     int                       m_index = 0;
+    std::wstring              m_directory;
 };

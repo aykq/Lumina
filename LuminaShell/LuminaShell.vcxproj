@@ -80,7 +80,13 @@
       <ModuleDefinitionFile>$(ProjectDir)src\LuminaShell.def</ModuleDefinitionFile>
       <AdditionalDependencies>windowscodecs.lib;winhttp.lib;shlwapi.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <!-- DLL sonrası otomatik kayıt (admin gerekmez, HKCU kullanır) -->
+    <!-- Build öncesi: DLL kilidini kaldır (shell host process'i durdur) -->
+    <PreBuildEvent>
+      <Command>regsvr32 /s /u "$(TargetPath)" 2&gt;nul
+taskkill /f /im dllhost.exe 2&gt;nul
+exit 0</Command>
+    </PreBuildEvent>
+    <!-- DLL sonrası otomatik kayıt -->
     <PostBuildEvent>
       <Command>regsvr32 /s "$(TargetPath)"</Command>
     </PostBuildEvent>

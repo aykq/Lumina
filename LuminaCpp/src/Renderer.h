@@ -60,7 +60,7 @@ namespace StripLayout {
     constexpr float ToggleW   = 48.0f;  // toggle pill genişliği
     constexpr float ToggleH   = 18.0f;  // toggle pill yüksekliği
     constexpr int   HalfCount =  4;     // mevcut her iki yanındaki thumbnail sayısı
-    constexpr int   ThumbCacheMax = 20; // maksimum önbellek girdi sayısı
+    constexpr int   ThumbCacheMax = 60; // maksimum önbellek girdi sayısı
 }
 
 // Görüntüye ait metadata (decode thread'de doldurulur, UI thread'de okunur)

@@ -34,6 +34,7 @@ static constexpr UINT     WM_META_DONE          = WM_APP + 4;  // hızlı metada
 static constexpr UINT     WM_LOCATION_DONE      = WM_APP + 5;  // Nominatim sonucu
 static constexpr UINT     WM_PREVIEW_DONE       = WM_APP + 6;  // HEIC gömülü thumbnail
 static constexpr UINT     WM_SAVE_DONE          = WM_APP + 7;  // arka plan kayıt tamamlandı
+static constexpr UINT     WM_FILE_CHANGED       = WM_APP + 8;  // dizin değişikliği (watcher thread'den)
 static constexpr UINT_PTR kZoomIndicatorTimerID = 1;
 static constexpr UINT_PTR kPanelAnimTimerID     = 2;
 static constexpr UINT_PTR kAnimTimerID          = 3;
@@ -45,6 +46,7 @@ static constexpr UINT_PTR kZoomFadeTimerID      = 8;  // zoom indicator alpha an
 static constexpr UINT_PTR kCopyFeedbackTimerID  = 9;  // 1.5s kopyala feedback sıfırlama
 static constexpr UINT_PTR kEditToolbarIdleTimerID = 10; // 2s hareketsizlik → edit toolbar fade başlar
 static constexpr UINT_PTR kEditToolbarFadeTimerID = 11; // edit toolbar alpha animasyonu
+static constexpr UINT_PTR kDirChangeTimerID       = 12; // dizin değişikliği debounce (200ms)
 
 // Animasyon timer aralığı — 7ms ≈ 143fps (timeBeginPeriod(1) ile hassas çalışır)
 static constexpr UINT     kAnimIntervalMs       = 7;
@@ -146,6 +148,11 @@ static std::unordered_set<std::wstring>                  g_prefetchDesired;
 
 // Aynı anda en fazla 4 ağır decode (CPU thrash önlemi: her biri ~100ms, 6 foto/sn için yeterli)
 static std::counting_semaphore<16>                       g_prefetchSemaphore{4};
+
+// --- Dizin değişiklik izleyici ---
+static HANDLE       g_watchStopEvent = nullptr;  // manuel-reset event; set edilince thread durur
+static std::thread  g_watchThread;
+static std::wstring g_watchDirPath;
 
 // --- Thumbnail decode cancel ---
 static std::atomic<uint64_t>                           g_thumbCancel{0};
@@ -805,8 +812,128 @@ static void StartTileFetches(HWND hwnd, double lat, double lon)
     }
 }
 
+// --- Dizin değişiklik izleyici ---
+
+static void StopDirectoryWatcher()
+{
+    if (g_watchStopEvent)
+    {
+        SetEvent(g_watchStopEvent);
+        if (g_watchThread.joinable()) g_watchThread.join();
+        CloseHandle(g_watchStopEvent);
+        g_watchStopEvent = nullptr;
+    }
+    g_watchDirPath.clear();
+}
+
+static void StartDirectoryWatcher(HWND hwnd, const std::wstring& dir)
+{
+    if (dir == g_watchDirPath) return;  // Aynı dizin — yeniden başlatma
+
+    StopDirectoryWatcher();
+    g_watchDirPath   = dir;
+    g_watchStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_watchStopEvent) return;
+
+    HANDLE stopEv = g_watchStopEvent;
+    g_watchThread = std::thread([hwnd, dir, stopEv]()
+    {
+        HANDLE hDir = CreateFileW(
+            dir.c_str(),
+            FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+            nullptr
+        );
+        if (hDir == INVALID_HANDLE_VALUE) return;
+
+        char     buf[4096];
+        OVERLAPPED ov = {};
+        HANDLE hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!hEvent) { CloseHandle(hDir); return; }
+        ov.hEvent = hEvent;
+
+        static const wchar_t* kImageExts[] = {
+            L".jpg", L".jpeg", L".png", L".bmp", L".gif",
+            L".tiff", L".tif", L".ico", L".webp",
+            L".heic", L".heif", L".jxl", L".avif"
+        };
+
+        while (true)
+        {
+            ResetEvent(hEvent);
+            BOOL ok = ReadDirectoryChangesW(
+                hDir, buf, sizeof(buf), FALSE,
+                FILE_NOTIFY_CHANGE_FILE_NAME,
+                nullptr, &ov, nullptr
+            );
+            if (!ok && GetLastError() != ERROR_IO_PENDING)
+                break;
+
+            HANDLE handles[2] = { hEvent, stopEv };
+            DWORD wait = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+
+            if (wait != WAIT_OBJECT_0)
+            {
+                // Durdurma isteği veya hata — bekleyen I/O'yu iptal et
+                CancelIo(hDir);
+                WaitForSingleObject(hEvent, 2000);
+                break;
+            }
+
+            DWORD bytesRet = 0;
+            GetOverlappedResult(hDir, &ov, &bytesRet, FALSE);
+            if (bytesRet == 0)
+            {
+                // Buffer taştı — değişiklik var ama detay yok; her koşulda bildir
+                PostMessage(hwnd, WM_FILE_CHANGED, 0, 0);
+                continue;
+            }
+
+            // Bildirim kayıtlarını tara — en az bir resim dosyası etkilendiyse bildir
+            bool hasImageChange = false;
+            const char* p = buf;
+            while (!hasImageChange)
+            {
+                const auto* fni = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(p);
+                std::wstring name(fni->FileName, fni->FileNameLength / sizeof(wchar_t));
+                auto dotPos = name.rfind(L'.');
+                if (dotPos != std::wstring::npos)
+                {
+                    std::wstring ext = name.substr(dotPos);
+                    for (auto& c : ext) c = towlower(c);
+                    for (auto kExt : kImageExts)
+                        if (ext == kExt) { hasImageChange = true; break; }
+                }
+                if (fni->NextEntryOffset == 0) break;
+                p += fni->NextEntryOffset;
+            }
+
+            if (hasImageChange)
+                PostMessage(hwnd, WM_FILE_CHANGED, 0, 0);
+        }
+
+        CloseHandle(hEvent);
+        CloseHandle(hDir);
+    });
+}
+
+// Pencere genişliğine göre strip yarı-slot sayısını hesaplar
+static int ComputeStripHalfCount(HWND hwnd)
+{
+    RECT rc = {};
+    GetClientRect(hwnd, &rc);
+    float winW = static_cast<float>(rc.right - rc.left);
+    // Ortalama slot genişliği: ThumbH * 1.3 oran (yatay) + PadX ≈ 92px
+    constexpr float kAvgSlotW = StripLayout::ThumbH * 1.3f + StripLayout::PadX;
+    int half = static_cast<int>(winW / 2.0f / kAvgSlotW) + 1;
+    return (half < StripLayout::HalfCount) ? StripLayout::HalfCount : half;
+}
+
 // Strip slot'larını navigator'a göre renderer'a yükler
-static void UpdateStripSlots()
+static void UpdateStripSlots(HWND hwnd)
 {
     if (!g_renderer) return;
     if (!g_navigator || g_navigator->empty())
@@ -814,7 +941,7 @@ static void UpdateStripSlots()
         g_renderer->SetStripSlots({}, 0);
         return;
     }
-    constexpr int kHalf = StripLayout::HalfCount;
+    int kHalf = ComputeStripHalfCount(hwnd);
     std::vector<std::wstring> paths;
     paths.reserve(2 * kHalf + 1);
     for (int i = -kHalf; i <= kHalf; ++i)
@@ -827,11 +954,11 @@ static void TriggerThumbFetches(HWND hwnd)
 {
     if (!g_renderer || !g_navigator || g_navigator->empty()) return;
     uint64_t token = g_thumbCancel.load();
-    constexpr int kHalf = StripLayout::HalfCount;
+    int kHalf = ComputeStripHalfCount(hwnd);
     for (int i = -kHalf; i <= kHalf; ++i)
     {
-        const std::wstring& path = g_navigator->peek_at(i);
-        if (!g_renderer->HasThumbnail(path))
+        const std::wstring& path = g_navigator->peek_at_linear(i);
+        if (!path.empty() && !g_renderer->HasThumbnail(path))
             StartThumbDecode(hwnd, path, token);
     }
 }
@@ -902,7 +1029,7 @@ static void NavigateTo(HWND hwnd, const std::wstring& path)
             delete cached;
             // Lock serbest bırakıldıktan sonra prefetch tetikle (deadlock önlemi)
             TriggerPrefetch();
-            UpdateStripSlots();
+            UpdateStripSlots(hwnd);
             TriggerThumbFetches(hwnd);
             // GPS varsa OSM tile'larını arka planda çek (cache hit yolunda da gerekli)
             if (g_imageInfo.hasGpsDecimal)
@@ -934,7 +1061,7 @@ static void NavigateTo(HWND hwnd, const std::wstring& path)
 
     // Cache miss — normal decode başlat; strip slot'larını hemen güncelle
     ResetIndexIdleTimer(hwnd);
-    UpdateStripSlots();
+    UpdateStripSlots(hwnd);
     TriggerThumbFetches(hwnd);
     StartDecode(hwnd, path);
     // Filmstrip thumbnail varsa geçici önizleme olarak göster — tam decode gelince değişir.
@@ -2059,6 +2186,50 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
             InvalidateRect(hwnd, nullptr, FALSE);
         }
+        else if (wParam == kDirChangeTimerID)
+        {
+            KillTimer(hwnd, kDirChangeTimerID);
+            if (g_navigator && !g_navigator->empty())
+            {
+                std::wstring currentPath = g_navigator->current();
+                bool currentExists =
+                    GetFileAttributesW(currentPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+
+                g_navigator->refresh();
+
+                if (g_navigator->empty())
+                {
+                    // Klasördeki tüm resimler silindi
+                    if (g_renderer) { g_renderer->ClearImage(); g_renderer->SetStripSlots({}, 0); }
+                    g_viewState = ViewState{};
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                else
+                {
+                    g_viewState.imageIndex = g_navigator->index() + 1;
+                    g_viewState.imageTotal = g_navigator->total();
+
+                    if (!currentExists && !g_viewState.editDirty)
+                    {
+                        // Geçerli dosya silindi, kaydedilmemiş değişiklik yok → komşuya geç
+                        NavigateTo(hwnd, g_navigator->current());
+                    }
+                    else
+                    {
+                        // Listeye dosya eklendi/silindi ama geçerli dosya hâlâ mevcut
+                        ++g_thumbCancel;
+                        UpdateStripSlots(hwnd);
+                        TriggerThumbFetches(hwnd);
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                }
+            }
+        }
+        return 0;
+
+    case WM_FILE_CHANGED:
+        // Watcher thread'den gelen bildirim — debounce: 200ms sonra işle
+        SetTimer(hwnd, kDirChangeTimerID, 200, nullptr);
         return 0;
 
     case WM_SAVE_DONE:
@@ -2144,7 +2315,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             // Decode tamamlandı — komşuları arka planda yükle
             TriggerPrefetch();
             // Strip slot'larını güncelle (ilk açılışta NavigateTo çağrılmaz, burada yapılır)
-            UpdateStripSlots();
+            UpdateStripSlots(hwnd);
             TriggerThumbFetches(hwnd);
             // GPS varsa OSM tile'larını arka planda çek (META_DONE başlatmadıysa)
             if (g_imageInfo.hasGpsDecimal && !tilesAlreadyStarted)
@@ -2255,6 +2426,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         KillTimer(hwnd, kCopyFeedbackTimerID);
         KillTimer(hwnd, kEditToolbarIdleTimerID);
         KillTimer(hwnd, kEditToolbarFadeTimerID);
+        KillTimer(hwnd, kDirChangeTimerID);
+        StopDirectoryWatcher();
         timeEndPeriod(1);
         // Prefetch cache'ini temizle
         {
@@ -2349,8 +2522,12 @@ int WINAPI WinMain(
 
         // Thumbnail decode'larını ana decode ile paralel başlat
         // (WM_DECODE_DONE beklenmez — her ikisi de eş zamanlı çalışır)
-        UpdateStripSlots();
+        UpdateStripSlots(hwnd);
         TriggerThumbFetches(hwnd);
+
+        // Dizin değişikliklerini izle (eklenen/silinen resimler → filmstrip güncellenir)
+        if (!g_navigator->directory().empty())
+            StartDirectoryWatcher(hwnd, g_navigator->directory());
     }
 
     ShowWindow(hwnd, nCmdShow);

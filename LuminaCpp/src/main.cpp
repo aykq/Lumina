@@ -1011,20 +1011,66 @@ static std::wstring GetFormatFromPath(const std::wstring& path)
 
 static std::wstring ShowSaveAsDialog(HWND hwnd, const std::wstring& currentPath)
 {
+    // Filter sırası — nFilterIndex (1 tabanlı) ile eşleşmeli
+    static const wchar_t* kExts[] = {
+        L"jpg", L"png", L"webp", L"bmp", L"tiff", L"heic", L"jxl", L"avif"
+    };
+
     wchar_t buf[MAX_PATH] = {};
     if (!currentPath.empty())
         wcsncpy_s(buf, currentPath.c_str(), MAX_PATH - 1);
 
-    OPENFILENAMEW ofn    = {};
-    ofn.lStructSize      = sizeof(ofn);
-    ofn.hwndOwner        = hwnd;
-    ofn.lpstrFile        = buf;
-    ofn.nMaxFile         = MAX_PATH;
-    ofn.lpstrFilter      = L"JPEG\0*.jpg;*.jpeg\0PNG\0*.png\0WebP\0*.webp\0"
-                           L"BMP\0*.bmp\0TIFF\0*.tiff;*.tif\0JXL\0*.jxl\0AVIF\0*.avif\0\0";
-    ofn.Flags            = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    // Mevcut dosyanın uzantısına göre başlangıç filter'ı seç
+    DWORD initIdx = 1; // varsayılan: JPEG
+    {
+        auto dot = currentPath.rfind(L'.');
+        if (dot != std::wstring::npos) {
+            std::wstring ext = currentPath.substr(dot + 1);
+            for (auto& c : ext) c = towupper(c);
+            if      (ext == L"PNG")                     initIdx = 2;
+            else if (ext == L"WEBP")                    initIdx = 3;
+            else if (ext == L"BMP")                     initIdx = 4;
+            else if (ext == L"TIFF" || ext == L"TIF")  initIdx = 5;
+            else if (ext == L"HEIC" || ext == L"HEIF") initIdx = 6;
+            else if (ext == L"JXL")                     initIdx = 7;
+            else if (ext == L"AVIF")                    initIdx = 8;
+        }
+    }
 
-    return GetSaveFileNameW(&ofn) ? buf : L"";
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize   = sizeof(ofn);
+    ofn.hwndOwner     = hwnd;
+    ofn.lpstrFile     = buf;
+    ofn.nMaxFile      = MAX_PATH;
+    ofn.lpstrFilter   = L"JPEG\0*.jpg;*.jpeg\0PNG\0*.png\0WebP\0*.webp\0"
+                        L"BMP\0*.bmp\0TIFF\0*.tiff;*.tif\0HEIC\0*.heic;*.heif\0"
+                        L"JXL\0*.jxl\0AVIF\0*.avif\0\0";
+    ofn.nFilterIndex  = initIdx;
+    ofn.Flags         = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+    if (!GetSaveFileNameW(&ofn)) return L"";
+
+    // Seçilen filter'a göre uzantıyı zorla — kullanıcı JPEG seçtiyse
+    // dosya adı .heic kalsa bile .jpg uzantılı yola döndür.
+    std::wstring result = buf;
+    DWORD idx = ofn.nFilterIndex - 1; // 0 tabanlı
+    if (idx < ARRAYSIZE(kExts)) {
+        auto dot = result.rfind(L'.');
+        std::wstring stem = (dot != std::wstring::npos) ? result.substr(0, dot) : result;
+        std::wstring corrected = stem + L'.' + kExts[idx];
+
+        // Uzantı değiştiyse ve hedef dosya mevcutsa overwrite sor
+        if (corrected != result &&
+            GetFileAttributesW(corrected.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            std::wstring fname = corrected.substr(corrected.find_last_of(L"\\/") + 1);
+            std::wstring msg   = fname + L" zaten mevcut.\nUzerine yazilsin mi?";
+            if (MessageBoxW(hwnd, msg.c_str(), L"Uzerine Yaz",
+                            MB_YESNO | MB_ICONWARNING) != IDYES)
+                return L"";
+        }
+        result = corrected;
+    }
+    return result;
 }
 
 // --- Edit eylem yardımcıları ---

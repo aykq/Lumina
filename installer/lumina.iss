@@ -54,6 +54,9 @@ Name: "assoc\jxl";   Description: "JPEG XL (.jxl)";             GroupDescription
 [Files]
 Source: "..\x64\Release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\x64\Release\{#AppDllName}"; DestDir: "{app}"; Flags: ignoreversion regserver
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\THIRD-PARTY-NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\third-party-licenses\*"; DestDir: "{app}\third-party-licenses"; Flags: ignoreversion
 
 [Icons]
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: shortcut_desktop

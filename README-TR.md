@@ -134,3 +134,5 @@ Harita karoları ve verisi © [OpenStreetMap katkıcıları](https://www.openstr
 ## Lisans
 
 MIT © 2025 AykQ — bkz. [LICENSE](LICENSE).
+
+Üçüncü taraf kütüphaneler ve lisansları [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) dosyasında listelenmiştir.

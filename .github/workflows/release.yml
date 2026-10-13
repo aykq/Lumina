@@ -82,7 +82,10 @@ jobs:
           Compress-Archive `
             -Path "x64\Release\LuminaCpp.exe",
                   "x64\Release\LuminaShell.dll",
-                  "installer\PORTABLE_README.txt" `
+                  "installer\PORTABLE_README.txt",
+                  "LICENSE",
+                  "THIRD-PARTY-NOTICES.md",
+                  "third-party-licenses" `
             -DestinationPath "installer\output\Lumina-$ver-x64-Portable.zip"
 
       - name: Generate checksums

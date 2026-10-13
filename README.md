@@ -130,3 +130,5 @@ Map tiles and data are © [OpenStreetMap contributors](https://www.openstreetmap
 ## License
 
 MIT © 2025 AykQ — see [LICENSE](LICENSE).
+
+Third-party libraries and their licenses are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

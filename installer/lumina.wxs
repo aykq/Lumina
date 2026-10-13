@@ -23,7 +23,9 @@
 
     <!-- ── Directory structure ─────────────────────────────────────────── -->
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="Lumina" />
+      <Directory Id="INSTALLFOLDER" Name="Lumina">
+        <Directory Id="LICENSESFOLDER" Name="third-party-licenses" />
+      </Directory>
     </StandardDirectory>
 
     <StandardDirectory Id="ProgramMenuFolder">
@@ -39,9 +41,30 @@
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="DesktopShortcut" />
       <ComponentRef Id="FileAssociations" />
+      <ComponentRef Id="LicenseFiles" />
+      <ComponentRef Id="ThirdPartyLicenseFiles" />
     </Feature>
 
     <!-- ── Components ──────────────────────────────────────────────────── -->
+
+    <!-- License and third-party notices -->
+    <Component Id="LicenseFiles" Directory="INSTALLFOLDER" Guid="8110F557-44B1-4526-8B4F-F263287C1036">
+      <File Id="LicenseTxt" Source="LICENSE" KeyPath="yes" />
+      <File Id="ThirdPartyNotices" Source="THIRD-PARTY-NOTICES.md" />
+    </Component>
+    <Component Id="ThirdPartyLicenseFiles" Directory="LICENSESFOLDER" Guid="56A86A66-B027-4581-A780-92AB976A0936">
+      <File Id="Lic_brotli" Source="third-party-licenses\brotli.txt" KeyPath="yes" />
+      <File Id="Lic_highway" Source="third-party-licenses\highway.txt" />
+      <File Id="Lic_lcms2" Source="third-party-licenses\lcms2.txt" />
+      <File Id="Lic_libavif" Source="third-party-licenses\libavif.txt" />
+      <File Id="Lic_libde265" Source="third-party-licenses\libde265.txt" />
+      <File Id="Lic_libheif" Source="third-party-licenses\libheif.txt" />
+      <File Id="Lic_libjpeg_turbo" Source="third-party-licenses\libjpeg-turbo.txt" />
+      <File Id="Lic_libjxl" Source="third-party-licenses\libjxl.txt" />
+      <File Id="Lic_libwebp" Source="third-party-licenses\libwebp.txt" />
+      <File Id="Lic_libyuv" Source="third-party-licenses\libyuv.txt" />
+      <File Id="Lic_x265" Source="third-party-licenses\x265.txt" />
+    </Component>
 
     <!-- Main executable -->
     <Component Id="AppExe" Directory="INSTALLFOLDER" Guid="A1B2C3D4-E5F6-4789-A0B1-C2D3E4F5A6B7">

@@ -108,6 +108,7 @@ jobs:
         id: relnotes
         shell: bash
         run: |
+          git fetch --force --no-tags origin "refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}"
           {
             echo 'BODY<<EOF'
             git tag -l --format='%(contents)' "${{ github.ref_name }}"

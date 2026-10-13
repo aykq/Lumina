@@ -123,6 +123,10 @@ regsvr32 "x64\Release\LuminaShell.dll"
 
 Issues and pull requests are welcome. Please open an issue before starting a significant change so we can discuss the approach.
 
+## Map data
+
+Map tiles and data are © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), available under the [ODbL](https://opendatacommons.org/licenses/odbl/).
+
 ## License
 
 MIT © 2025 AykQ — see [LICENSE](LICENSE).

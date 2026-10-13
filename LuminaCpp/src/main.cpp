@@ -56,6 +56,7 @@ static constexpr UINT_PTR kTooltipFadeTimerID     = 14; // tooltip fade-in anima
 static constexpr UINT_PTR kDialogFadeTimerID      = 16; // modal dialog fade-in
 static constexpr UINT_PTR kSaveBarFadeTimerID     = 17; // save bar fade-in
 static constexpr UINT_PTR kEditMoreFadeTimerID    = 18; // araçlar paneli genişleme animasyonu
+static constexpr UINT_PTR kMapAttribTimerID       = 19; // harita "i" butonunda hover bekle → OSM atfını aç
 
 // Animasyon timer aralığı — 7ms ≈ 143fps (timeBeginPeriod(1) ile hassas çalışır)
 static constexpr UINT     kAnimIntervalMs       = 7;
@@ -1279,6 +1280,7 @@ static void NavigateTo(HWND hwnd, const std::wstring& path)
     KillTimer(hwnd, kEditToolbarFadeTimerID);
     KillTimer(hwnd, kTooltipDelayTimerID);
     KillTimer(hwnd, kTooltipFadeTimerID);
+    KillTimer(hwnd, kMapAttribTimerID);
 
     bool            keepPanel    = g_viewState.showInfoPanel;
     float           keepAnimW    = g_viewState.panelAnimWidth;
@@ -2254,6 +2256,16 @@ static void Timer_TooltipDelay(HWND hwnd)
     }
 }
 
+static void Timer_MapAttrib(HWND hwnd)
+{
+    KillTimer(hwnd, kMapAttribTimerID);
+    if (g_viewState.mapAttribHover)
+    {
+        g_viewState.mapAttribOpen = true;
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+}
+
 static void Timer_TooltipFade(HWND hwnd)
 {
     LARGE_INTEGER now;
@@ -2516,6 +2528,7 @@ static LRESULT On_WM_TIMER(HWND hwnd, WPARAM wParam)
     else if (wParam == kZoomFadeTimerID)         Timer_ZoomFade(hwnd);
     else if (wParam == kTooltipDelayTimerID)     Timer_TooltipDelay(hwnd);
     else if (wParam == kTooltipFadeTimerID)      Timer_TooltipFade(hwnd);
+    else if (wParam == kMapAttribTimerID)        Timer_MapAttrib(hwnd);
     else if (wParam == kPanelAnimTimerID)        Timer_PanelAnim(hwnd);
     else if (wParam == kZoomAnimTimerID)         Timer_ZoomAnim(hwnd);
     else if (wParam == kAnimTimerID)             Timer_Anim(hwnd);
@@ -3267,6 +3280,36 @@ static void MouseMove_Idle(HWND hwnd, float mx, float my)
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 
+    {
+        bool overInfo = false;
+        if (g_renderer && g_renderer->IsMapPreviewVisible() && g_imageInfo.hasGpsDecimal)
+        {
+            const D2D1_RECT_F r = g_renderer->GetMapInfoRect();
+            overInfo = mx >= r.left && mx <= r.right && my >= r.top && my <= r.bottom;
+        }
+        if (overInfo != g_viewState.mapAttribHover)
+        {
+            g_viewState.mapAttribHover = overInfo;
+            if (overInfo)
+            {
+                if (!g_mouseTracking)
+                {
+                    TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+                    TrackMouseEvent(&tme);
+                    g_mouseTracking = true;
+                }
+                if (!g_viewState.mapAttribOpen)
+                    SetTimer(hwnd, kMapAttribTimerID, 400, nullptr);
+            }
+            else
+            {
+                KillTimer(hwnd, kMapAttribTimerID);
+                g_viewState.mapAttribOpen = false;
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+    }
+
     if (!g_dragging) return;
     float nx = g_panAtDragStartX + (mx - g_dragStartX);
     float ny = g_panAtDragStartY + (my - g_dragStartY);
@@ -3662,6 +3705,15 @@ static LRESULT LBUp_Panel(HWND hwnd, float mx, float my)
         }
         if (g_renderer->IsMapPreviewVisible() && g_imageInfo.hasGpsDecimal)
         {
+            const D2D1_RECT_F ri = g_renderer->GetMapInfoRect();
+            if (mx >= ri.left && mx <= ri.right && my >= ri.top && my <= ri.bottom)
+            {
+                // "i" butonuna tık: atfı aç/kapat (Google Maps açılmasın)
+                KillTimer(hwnd, kMapAttribTimerID);
+                g_viewState.mapAttribOpen = !g_viewState.mapAttribOpen;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             D2D1_RECT_F r = g_renderer->GetMapPreviewRect();
             if (mx >= r.left && mx <= r.right && my >= r.top && my <= r.bottom)
             {
@@ -3903,6 +3955,13 @@ static LRESULT On_WM_MOUSEWHEEL(HWND hwnd, WPARAM wParam, LPARAM lParam)
 static LRESULT On_WM_MOUSELEAVE(HWND hwnd)
 {
     g_mouseTracking = false;
+    if (g_viewState.mapAttribHover || g_viewState.mapAttribOpen)
+    {
+        g_viewState.mapAttribHover = false;
+        g_viewState.mapAttribOpen  = false;
+        KillTimer(hwnd, kMapAttribTimerID);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
     if (!g_viewState.editDirty && g_viewState.editToolbarAlpha > 0.0f)
     {
         KillTimer(hwnd, kEditToolbarIdleTimerID);

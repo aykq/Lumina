@@ -133,6 +133,8 @@ struct ViewState
     bool  editBtnResizePressed  = false;  // Resize butonu basılı (press highlight)
     int   editToolbarHoverBtn   = 0;      // 0=yok, 1=CCW, 2=CW, 3=Araçlar, 4=Free, 5=Resize, 6=Kırp
     float editToolbarTooltipAlpha = 0.0f; // tooltip fade-in opaklığı (0=gizli, 1=tam)
+    bool  mapAttribHover       = false;  // imleç harita "i" butonunun üstünde
+    bool  mapAttribOpen        = false;  // OSM atıf yazısı açık (hover gecikmesi doldu ya da tıklandı)
     bool  editBtnMorePressed   = false;  // ··· araçlar butonu basılı
     bool  editMoreExpanded     = false;  // araçlar paneli açık mı
     float editMoreAlpha        = 0.0f;   // genişleme animasyon değeri (0=kapalı, 1=açık)
@@ -229,6 +231,7 @@ public:
     // WndProc WM_LBUTTONUP'ta tıklama kontrolü için kullanılır.
     D2D1_RECT_F GetMapPreviewRect()    const { return m_mapPreviewRect; }
     bool        IsMapPreviewVisible()  const { return m_mapPreviewVisible; }
+    D2D1_RECT_F GetMapInfoRect()       const { return m_mapInfoRect; }
 
     // Kopyala butonu rect — harita sağ üst köşesi 28×28px.
     D2D1_RECT_F GetMapCopyBtnRect()    const { return m_mapCopyBtnRect; }
@@ -375,6 +378,7 @@ private:
     IDWriteTextFormat*     m_indexFormat   = nullptr;  // 14 DIP Semi-Bold, center — index bar
     IDWriteTextFormat*     m_toggleFormat  = nullptr;  // 10 DIP Regular,    center — time toggle pill
     IDWriteTextFormat*     m_btnFormat     = nullptr;  // 13 DIP SemiBold,   center — save bar butonları
+    IDWriteTextFormat*     m_attribFormat  = nullptr;  // 9 DIP Regular,    left   — harita OSM atfı
 
     // Fırçalar (cihaza bağlı, render target ile birlikte oluşturulur/yok edilir)
     ID2D1SolidColorBrush*  m_whiteBrush       = nullptr;   // Metin için
@@ -430,6 +434,7 @@ private:
 
     // Harita önizleme alanı — DrawMapPreview tarafından doldurulur
     D2D1_RECT_F m_mapPreviewRect    = {};
+    D2D1_RECT_F m_mapInfoRect       = {};   // OSM atıf "i" butonu hover/tık alanı
     bool        m_mapPreviewVisible = false;
 
     // Kopyala butonu alanı — DrawMapPreview tarafından doldurulur

@@ -91,6 +91,19 @@ Renderer::Renderer(HWND hwnd) : m_hwnd(hwnd)
             m_btnFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             m_btnFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
+
+        // Harita atfı: 9 DIP Regular, sola dayalı (konum DrawMapPreview'da ölçülüp ayarlanır)
+        m_dwriteFactory->CreateTextFormat(
+            L"Segoe UI", nullptr,
+            DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            9.0f, L"", &m_attribFormat
+        );
+        if (m_attribFormat)
+        {
+            m_attribFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            m_attribFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            m_attribFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        }
     }
 }
 
@@ -98,8 +111,9 @@ Renderer::~Renderer()
 {
     DiscardDeviceResources();
 
+    if (m_attribFormat)  { m_attribFormat->Release();  m_attribFormat = nullptr; }
     if (m_btnFormat)     { m_btnFormat->Release();     m_btnFormat = nullptr; }
-    if (m_toggleFormat)  { m_toggleFormat->Release();  m_toggleFormat = nullptr; }
+    if (m_toggleFormat) { m_toggleFormat->Release();  m_toggleFormat = nullptr; }
     if (m_indexFormat)   { m_indexFormat->Release();   m_indexFormat = nullptr; }
     if (m_valueFormat)   { m_valueFormat->Release();   m_valueFormat = nullptr; }
     if (m_labelFormat)   { m_labelFormat->Release();   m_labelFormat = nullptr; }
@@ -2675,6 +2689,49 @@ void Renderer::DrawMapPreview(float x0, float /*x1*/, float y, const ViewState& 
         redBrush->Release();
     }
     if (m_whiteBrush) m_renderTarget->DrawEllipse(pinEllipse, m_whiteBrush, kPinBorder);
+
+    // ── OSM atfı — sağ alt köşede "i" butonu; hover/tık ile yazı açılır ────
+    // (tile kullanım politikası gereği atıf kullanıcıya erişilebilir olmalı)
+    if (m_attribFormat && m_toggleFormat && m_overlayBrush && m_whiteBrush && m_grayBrush)
+    {
+        constexpr float kInfoR   = 7.0f;   // görünen daire yarıçapı
+        constexpr float kInfoHit = 9.0f;   // hover/tık alanı yarı kenarı
+        const float icx = px1 - 12.0f;     // rounded köşe clip'ine taşmayacak kadar içeride
+        const float icy = py1 - 12.0f;
+        m_mapInfoRect = D2D1::RectF(icx - kInfoHit, icy - kInfoHit, icx + kInfoHit, icy + kInfoHit);
+
+        const bool lit = vs.mapAttribHover || vs.mapAttribOpen;
+        D2D1_ELLIPSE circle = D2D1::Ellipse(D2D1::Point2F(icx, icy), kInfoR, kInfoR);
+        m_renderTarget->FillEllipse(circle, m_overlayBrush);
+        if (lit) m_renderTarget->FillEllipse(circle, m_overlayBrush);
+        ID2D1SolidColorBrush* fg = lit ? m_whiteBrush : m_grayBrush;
+        m_renderTarget->DrawEllipse(circle, fg, 1.0f);
+        m_renderTarget->DrawText(L"i", 1, m_toggleFormat,
+                                 D2D1::RectF(icx - kInfoR, icy - kInfoR, icx + kInfoR, icy + kInfoR), fg);
+
+        if (vs.mapAttribOpen)
+        {
+            static const wchar_t kAttrib[] = L"© OpenStreetMap contributors";
+            IDWriteTextLayout* layout = nullptr;
+            m_dwriteFactory->CreateTextLayout(kAttrib, static_cast<UINT32>(wcslen(kAttrib)),
+                                              m_attribFormat, kW, kH, &layout);
+            if (layout)
+            {
+                DWRITE_TEXT_METRICS tm = {};
+                layout->GetMetrics(&tm);
+                constexpr float kPadX = 4.0f, kPadY = 2.0f;
+                const float bw = tm.widthIncludingTrailingWhitespace + 2.0f * kPadX;
+                const float bh = tm.height + 2.0f * kPadY;
+                const float right = icx - kInfoR - 4.0f;
+                const D2D1_RECT_F pill = D2D1::RectF(right - bw, icy - bh * 0.5f, right, icy + bh * 0.5f);
+                D2D1_ROUNDED_RECT prr = { pill, 3.0f, 3.0f };
+                m_renderTarget->FillRoundedRectangle(prr, m_overlayBrush);
+                m_renderTarget->DrawTextLayout(D2D1::Point2F(pill.left + kPadX, pill.top + kPadY),
+                                               layout, m_whiteBrush);
+                layout->Release();
+            }
+        }
+    }
 
     // ── Önizleme dış çerçevesi ─────────────────────────────────────────────
     if (m_separatorBrush) m_renderTarget->DrawRoundedRectangle(rr, m_separatorBrush, 1.0f);

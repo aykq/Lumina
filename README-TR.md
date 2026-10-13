@@ -127,6 +127,10 @@ regsvr32 "x64\Release\LuminaShell.dll"
 
 Sorun raporları ve pull request'ler memnuniyetle karşılanır. Kapsamlı bir değişikliğe başlamadan önce yaklaşımı görüşmek için lütfen önce bir issue açın.
 
+## Harita verisi
+
+Harita karoları ve verisi © [OpenStreetMap katkıcıları](https://www.openstreetmap.org/copyright), [ODbL](https://opendatacommons.org/licenses/odbl/) lisansıyla sunulur.
+
 ## Lisans
 
 MIT © 2025 AykQ — bkz. [LICENSE](LICENSE).

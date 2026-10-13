@@ -3,8 +3,8 @@
 101 ICON "Lumina.ico"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1,0,0,0
-PRODUCTVERSION  1,0,0,0
+FILEVERSION     1,4,5,0
+PRODUCTVERSION  1,4,5,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS__WINDOWS32
@@ -17,12 +17,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "AykQ"
             VALUE "FileDescription",  "Lumina Photo Viewer"
-            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "FileVersion",      "1.4.5.0"
             VALUE "InternalName",     "Lumina"
             VALUE "LegalCopyright",   "Copyright © 2026 AykQ"
             VALUE "OriginalFilename", "LuminaCpp.exe"
             VALUE "ProductName",      "Lumina"
-            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "ProductVersion",   "1.4.5.0"
         END
     END
     BLOCK "VarFileInfo"

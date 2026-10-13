@@ -25,6 +25,16 @@ jobs:
         shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Stamp version into exe resource
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.VERSION }}"
+          $path = Join-Path $PWD 'LuminaCpp\src\Lumina.rc'
+          $rc = [IO.File]::ReadAllText($path)
+          $rc = $rc -replace '(FILEVERSION|PRODUCTVERSION)(\s+)[\d,]+', ('${1}${2}' + ($v -replace '\.', ',') + ',0')
+          $rc = $rc -replace '("(?:File|Product)Version",\s+")[\d.]+(")', ('${1}' + $v + '.0${2}')
+          [IO.File]::WriteAllText($path, $rc, (New-Object Text.UTF8Encoding $false))
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce  # v2.0.0
 

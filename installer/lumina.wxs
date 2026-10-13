@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   WiX v4 MSI for Lumina
-  Build: wix build installer\lumina.wxs -d Version=1.0.0 -o installer\output\Lumina-1.0.0-x64.msi
+  Build: wix build installer\lumina.wxs -arch x64 -d Version=1.0.0 -o installer\output\Lumina-1.0.0-x64.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
@@ -15,6 +15,10 @@
     InstallerVersion="500">
 
     <SummaryInformation Description="Lumina Image Viewer" />
+
+    <!-- Add/Remove Programs icon -->
+    <Icon Id="LuminaIcon" SourceFile="LuminaCpp\src\Lumina.ico" />
+    <Property Id="ARPPRODUCTICON" Value="LuminaIcon" />
 
     <MajorUpgrade
       DowngradeErrorMessage="A newer version of Lumina is already installed." />

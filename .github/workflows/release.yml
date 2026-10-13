@@ -71,6 +71,7 @@ jobs:
         run: |
           $ver = "${{ steps.version.outputs.VERSION }}"
           wix build installer\lumina.wxs `
+            -arch x64 `
             -d Version="$ver" `
             -o "installer\output\Lumina-$ver-x64.msi"
 

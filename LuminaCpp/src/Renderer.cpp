@@ -1418,9 +1418,9 @@ void Renderer::DrawEditToolbar(const ViewState& vs)
     if (vs.editToolbarHoverBtn >= 1 && vs.editToolbarHoverBtn <= 6 && m_btnFormat && m_separatorBrush
         && vs.editToolbarTooltipAlpha > 0.01f)
     {
-        static const wchar_t* kTips[]  = { L"Sola döndür", L"Sağa döndür", L"Düzenle",
-                                            L"Serbest döndür", L"Yeniden boyutlandır", L"Kırp" };
-        static const float    kTipWs[] = { 110.0f, 110.0f, 85.0f, 140.0f, 180.0f, 72.0f };
+        static const wchar_t* kTips[]  = { L"Rotate left", L"Rotate right", L"Edit",
+                                            L"Free rotate", L"Resize", L"Crop" };
+        static const float    kTipWs[] = { 110.0f, 116.0f, 72.0f, 110.0f, 82.0f, 72.0f };
         const int   tipIdx = vs.editToolbarHoverBtn - 1;
         const float tipW   = kTipWs[tipIdx];
         const float tipH   = 26.0f;

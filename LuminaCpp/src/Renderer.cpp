@@ -729,7 +729,7 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
                 // Onay istenmemiş — kullanıcıdan izin al
                 constexpr float kPromptH = 38.0f;
                 const wchar_t* kPromptText =
-                    L"Konum adı için GPS koordinatları photon.komoot.io ve tile.openstreetmap.org adreslerine gönderilecek.";
+                    L"GPS coordinates are sent to photon.komoot.io and tile.openstreetmap.org for the location name.";
                 m_renderTarget->DrawText(
                     kPromptText, static_cast<UINT32>(wcslen(kPromptText)),
                     m_labelFormat,
@@ -766,7 +766,7 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
                     }
                     m_renderTarget->DrawRoundedRectangle(yesRR, greenBrush, 1.0f);
                     ID2D1SolidColorBrush* textBrush = (vs.locationConsentPress == 1) ? m_whiteBrush : greenBrush;
-                    m_renderTarget->DrawText(L"Evet", 4, m_btnFormat, yesRect, textBrush);
+                    m_renderTarget->DrawText(L"Yes", 3, m_btnFormat, yesRect, textBrush);
                     greenBrush->Release();
                 }
 
@@ -788,7 +788,7 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
                         m_overlayBrush->SetOpacity(savedOp);
                     }
                     m_renderTarget->DrawRoundedRectangle(noRR, m_separatorBrush, 1.0f);
-                    m_renderTarget->DrawText(L"Hayır", 5, m_btnFormat, noRect, m_grayBrush);
+                    m_renderTarget->DrawText(L"No", 2, m_btnFormat, noRect, m_grayBrush);
                 }
 
                 m_locationYesRect        = yesRect;
@@ -813,17 +813,17 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
                 if (m_dwriteFactory && m_grayBrush)
                 {
                     m_renderTarget->DrawText(
-                        L"Konum araması", 13, m_labelFormat,
-                        D2D1::RectF(x0, y, x1 - 52.0f, y + kLabelH),
+                        L"Location lookup", 15, m_labelFormat,
+                        D2D1::RectF(x0, y, x1 - 62.0f, y + kLabelH),
                         m_grayBrush
                     );
                     IDWriteTextLayout* layout = nullptr;
                     if (SUCCEEDED(m_dwriteFactory->CreateTextLayout(
-                        L"Kapat", 5, m_valueFormat, 52.0f, kLabelH, &layout)))
+                        L"Disable", 7, m_valueFormat, 60.0f, kLabelH, &layout)))
                     {
-                        DWRITE_TEXT_RANGE all = { 0, 5 };
+                        DWRITE_TEXT_RANGE all = { 0, 7 };
                         layout->SetUnderline(TRUE, all);
-                        float tx = x1 - 50.0f;
+                        float tx = x1 - 58.0f;
                         m_renderTarget->DrawTextLayout(D2D1::Point2F(tx, y), layout, m_grayBrush);
                         DWRITE_TEXT_METRICS tm{};
                         layout->GetMetrics(&tm);
@@ -842,17 +842,17 @@ void Renderer::DrawInfoPanel(const ViewState& vs, const ImageInfo* info)
                 if (vs.locationConsent == LocationConsent::Disabled && m_dwriteFactory && m_grayBrush)
                 {
                     m_renderTarget->DrawText(
-                        L"Konum araması", 13, m_labelFormat,
-                        D2D1::RectF(x0, y, x1 - 30.0f, y + kLabelH),
+                        L"Location lookup", 15, m_labelFormat,
+                        D2D1::RectF(x0, y, x1 - 50.0f, y + kLabelH),
                         m_grayBrush
                     );
                     IDWriteTextLayout* layout = nullptr;
                     if (SUCCEEDED(m_dwriteFactory->CreateTextLayout(
-                        L"Aç", 2, m_valueFormat, 30.0f, kLabelH, &layout)))
+                        L"Enable", 6, m_valueFormat, 48.0f, kLabelH, &layout)))
                     {
-                        DWRITE_TEXT_RANGE all = { 0, 2 };
+                        DWRITE_TEXT_RANGE all = { 0, 6 };
                         layout->SetUnderline(TRUE, all);
-                        float tx = x1 - 28.0f;
+                        float tx = x1 - 46.0f;
                         m_renderTarget->DrawTextLayout(D2D1::Point2F(tx, y), layout, m_grayBrush);
                         DWRITE_TEXT_METRICS tm{};
                         layout->GetMetrics(&tm);
@@ -1545,9 +1545,9 @@ void Renderer::DrawSaveBar(const ViewState& vs)
         bx += btnW + kGap;
     };
 
-    DrawBtn(m_saveBtnBrush,    L"Kaydet",       m_saveBarSaveRect);
-    DrawBtn(m_separatorBrush,  L"Kaydetme",     m_saveBarDiscardRect);
-    DrawBtn(m_overlayBrush,    L"Ayr\u0131 Kaydet",  m_saveBarSaveAsRect);
+    DrawBtn(m_saveBtnBrush,    L"Save",         m_saveBarSaveRect);
+    DrawBtn(m_separatorBrush,  L"Discard",      m_saveBarDiscardRect);
+    DrawBtn(m_overlayBrush,    L"Save As",       m_saveBarSaveAsRect);
 
     if (slayer)
         m_renderTarget->PopLayer();
@@ -1601,7 +1601,7 @@ void Renderer::DrawDeleteConfirmDialog(const ViewState& vs, const ImageInfo* inf
     m_renderTarget->DrawRoundedRectangle(dlgRR, m_separatorBrush, 1.0f);
 
     // Başlık
-    const wchar_t* title   = isWarning ? L"Silinemedi" : L"Fotoğrafı Sil";
+    const wchar_t* title   = isWarning ? L"Cannot Delete" : L"Delete Photo";
     D2D1_RECT_F titleRect  = D2D1::RectF(dlgLeft + kPadX, dlgTop + kPadY,
                                           dlgRight - kPadX, dlgTop + kPadY + 22.0f);
     m_renderTarget->DrawText(title, static_cast<UINT32>(wcslen(title)),
@@ -1612,8 +1612,8 @@ void Renderer::DrawDeleteConfirmDialog(const ViewState& vs, const ImageInfo* inf
     std::wstring dynMsg;
     if (isWarning)
     {
-        msg = L"Bu fotoğraf üzerinde kaydedilmemiş değişiklikler var.\n"
-              L"Önce değişiklikleri kaydedin veya iptal edin.";
+        msg = L"This photo has unsaved changes.\n"
+              L"Save or discard them first.";
     }
     else
     {
@@ -1623,10 +1623,10 @@ void Renderer::DrawDeleteConfirmDialog(const ViewState& vs, const ImageInfo* inf
             std::wstring displayName = info->filename;
             if (displayName.size() > kMaxDisplay)
                 displayName = displayName.substr(0, 20) + L"…" + displayName.substr(displayName.size() - 19);
-            dynMsg = L"“" + displayName + L"” dosyasını Geri Dönüşüm Kutusu'na taşımak istediğinize emin misiniz?";
+            dynMsg = L"Move “" + displayName + L"” to the Recycle Bin?";
         }
         else
-            dynMsg = L"Bu fotoğrafı Geri Dönüşüm Kutusu'na taşımak istediğinize emin misiniz?";
+            dynMsg = L"Move this photo to the Recycle Bin?";
         msg = dynMsg.c_str();
     }
     D2D1_RECT_F msgRect = D2D1::RectF(dlgLeft + kPadX, dlgTop + kPadY + 28.0f,
@@ -1670,7 +1670,7 @@ void Renderer::DrawDeleteConfirmDialog(const ViewState& vs, const ImageInfo* inf
         float btnLeft  = dlgLeft  + kPadX;
         float btnRight = dlgRight - kPadX;
         m_dlgCancelRect = {};
-        DrawDlgBtn(m_dlgDeleteRect, btnLeft, btnRight, m_separatorBrush, L"Tamam", 2);
+        DrawDlgBtn(m_dlgDeleteRect, btnLeft, btnRight, m_separatorBrush, L"OK", 2);
     }
     else
     {
@@ -1682,8 +1682,8 @@ void Renderer::DrawDeleteConfirmDialog(const ViewState& vs, const ImageInfo* inf
         float btn2L   = btn1R + kBtnGap;
         float btn2R   = dlgRight - kPadX;
 
-        DrawDlgBtn(m_dlgCancelRect, btn1L, btn1R, m_separatorBrush, L"İptal", 1);
-        DrawDlgBtn(m_dlgDeleteRect, btn2L, btn2R, m_deleteBrush,    L"Sil",      2);
+        DrawDlgBtn(m_dlgCancelRect, btn1L, btn1R, m_separatorBrush, L"Cancel", 1);
+        DrawDlgBtn(m_dlgDeleteRect, btn2L, btn2R, m_deleteBrush,    L"Delete",   2);
     }
 
     if (dlayer)
@@ -1745,7 +1745,7 @@ void Renderer::DrawResizeDialog(const ViewState& vs)
 
     // Başlık
     {
-        const wchar_t* title = L"Yeniden Boyutlandır";
+        const wchar_t* title = L"Resize";
         D2D1_RECT_F r = D2D1::RectF(dlgLeft + kPadX, dlgTop + kPadY,
                                       dlgRight - kPadX, dlgTop + kPadY + 22.0f);
         m_renderTarget->DrawText(title, static_cast<UINT32>(wcslen(title)),
@@ -1790,7 +1790,7 @@ void Renderer::DrawResizeDialog(const ViewState& vs)
         } else {
             m_renderTarget->FillRoundedRectangle(rr, bg);
         }
-        const wchar_t* lockLbl = L"Oran koru";
+        const wchar_t* lockLbl = L"Keep ratio";
         m_renderTarget->DrawText(lockLbl, static_cast<UINT32>(wcslen(lockLbl)),
                                   m_btnFormat, m_resizeDlgLockRect, m_whiteBrush);
     }
@@ -1865,8 +1865,8 @@ void Renderer::DrawResizeDialog(const ViewState& vs)
         wchar_t wBuf[32], hBuf[32];
         _snwprintf_s(wBuf, 32, _TRUNCATE, L"%d px", vs.resizeW);
         _snwprintf_s(hBuf, 32, _TRUNCATE, L"%d px", vs.resizeH);
-        DrawFieldRow(m_resizeDlgWDecRect, m_resizeDlgWIncRect, row1Top, 5, 6, L"Genişlik",   wBuf);
-        DrawFieldRow(m_resizeDlgHDecRect, m_resizeDlgHIncRect, row2Top, 7, 8, L"Yükseklik",  hBuf);
+        DrawFieldRow(m_resizeDlgWDecRect, m_resizeDlgWIncRect, row1Top, 5, 6, L"Width",   wBuf);
+        DrawFieldRow(m_resizeDlgHDecRect, m_resizeDlgHIncRect, row2Top, 7, 8, L"Height",  hBuf);
         m_resizeDlgHDecRect = {};  // px modunda H row mevcut — sıfırlamıyoruz
     }
     else
@@ -1874,7 +1874,7 @@ void Renderer::DrawResizeDialog(const ViewState& vs)
         // Yüzde modu: tek satır yüzde + sonuç bilgisi
         wchar_t pBuf[32];
         _snwprintf_s(pBuf, 32, _TRUNCATE, L"%d %%", vs.resizePct);
-        DrawFieldRow(m_resizeDlgWDecRect, m_resizeDlgWIncRect, row1Top, 5, 6, L"Yüzde", pBuf);
+        DrawFieldRow(m_resizeDlgWDecRect, m_resizeDlgWIncRect, row1Top, 5, 6, L"Percent", pBuf);
         m_resizeDlgHDecRect = {};
         m_resizeDlgHIncRect = {};
 
@@ -1921,8 +1921,8 @@ void Renderer::DrawResizeDialog(const ViewState& vs)
                                   m_btnFormat, out, m_whiteBrush);
     };
 
-    DrawMainBtn(m_resizeDlgCancelRect, btn1L, btn1R, m_separatorBrush, L"İptal",  1);
-    DrawMainBtn(m_resizeDlgApplyRect,  btn2L, btn2R, m_saveBtnBrush,   L"Uygula", 2);
+    DrawMainBtn(m_resizeDlgCancelRect, btn1L, btn1R, m_separatorBrush, L"Cancel",  1);
+    DrawMainBtn(m_resizeDlgApplyRect,  btn2L, btn2R, m_saveBtnBrush,   L"Apply", 2);
 
     if (dlayer)
         m_renderTarget->PopLayer();
@@ -1976,7 +1976,7 @@ void Renderer::DrawRotateFreeDialog(const ViewState& vs)
 
     // Başlık
     {
-        const wchar_t* title = L"Serbest Döndürme";
+        const wchar_t* title = L"Free Rotate";
         D2D1_RECT_F r = D2D1::RectF(dlgLeft + kPadX, dlgTop + 16.0f,
                                       dlgRight - kPadX, dlgTop + 38.0f);
         m_renderTarget->DrawText(title, static_cast<UINT32>(wcslen(title)),
@@ -2110,9 +2110,9 @@ void Renderer::DrawRotateFreeDialog(const ViewState& vs)
     const float btn1L = dlgLeft + kPadX;
     const float btn2L = btn1L + btnW + kBtnGap;
     const float btn3L = btn2L + btnW + kBtnGap;
-    DrawMainBtn(m_rotFreeDlgResetRect,  btn1L, m_separatorBrush, L"Sıfırla", 5);
-    DrawMainBtn(m_rotFreeDlgCancelRect, btn2L, m_separatorBrush, L"İptal",   6);
-    DrawMainBtn(m_rotFreeDlgApplyRect,  btn3L, m_saveBtnBrush,   L"Uygula",  7);
+    DrawMainBtn(m_rotFreeDlgResetRect,  btn1L, m_separatorBrush, L"Reset", 5);
+    DrawMainBtn(m_rotFreeDlgCancelRect, btn2L, m_separatorBrush, L"Cancel",   6);
+    DrawMainBtn(m_rotFreeDlgApplyRect,  btn3L, m_saveBtnBrush,   L"Apply",  7);
 
     if (dlayer)
         m_renderTarget->PopLayer();
@@ -2233,7 +2233,7 @@ void Renderer::DrawCropDialog(const ViewState& vs)
     const float btnTop = barTop + (kBarH - kBtnH) * 0.5f;
 
     // Oran butonları: Serbest | 1:1 | 4:3 | 3:2 | 16:9
-    static const wchar_t* kRatioLabels[] = { L"Serbest", L"1:1", L"4:3", L"3:2", L"16:9" };
+    static const wchar_t* kRatioLabels[] = { L"Free", L"1:1", L"4:3", L"3:2", L"16:9" };
     float rx = barLeft + kPadX;
     for (int i = 0; i < 5; ++i)
     {
@@ -2288,7 +2288,7 @@ void Renderer::DrawCropDialog(const ViewState& vs)
             m_renderTarget->FillRoundedRectangle(rr, m_activeBrush);
             m_activeBrush->SetOpacity(op);
         }
-        m_renderTarget->DrawText(L"İptal", 5, m_btnFormat, m_cropDlgCancelRect, m_whiteBrush);
+        m_renderTarget->DrawText(L"Cancel", 6, m_btnFormat, m_cropDlgCancelRect, m_whiteBrush);
     }
 
     // Uygula butonu
@@ -2313,7 +2313,7 @@ void Renderer::DrawCropDialog(const ViewState& vs)
             m_renderTarget->FillRoundedRectangle(rr, m_whiteBrush);
             m_whiteBrush->SetOpacity(op);
         }
-        m_renderTarget->DrawText(L"Uygula", 6, m_btnFormat, m_cropDlgApplyRect, m_whiteBrush);
+        m_renderTarget->DrawText(L"Apply", 5, m_btnFormat, m_cropDlgApplyRect, m_whiteBrush);
     }
 
     if (dlayer)

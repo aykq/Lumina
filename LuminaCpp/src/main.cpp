@@ -307,7 +307,7 @@ static void DoDecodeToResult(DecodeResult* result, bool fetchLocation = true)
     }
     else
     {
-        result->info.errorMessage = L"Bu dosya açılamıyor";
+        result->info.errorMessage = L"Cannot open this file";
     }
 }
 
@@ -1585,8 +1585,8 @@ static std::wstring ShowSaveAsDialog(HWND hwnd, const std::wstring& currentPath)
         if (corrected != result &&
             GetFileAttributesW(corrected.c_str()) != INVALID_FILE_ATTRIBUTES) {
             std::wstring fname = corrected.substr(corrected.find_last_of(L"\\/") + 1);
-            std::wstring msg   = fname + L" zaten mevcut.\nUzerine yazilsin mi?";
-            if (MessageBoxW(hwnd, msg.c_str(), L"Uzerine Yaz",
+            std::wstring msg   = fname + L" already exists.\nDo you want to overwrite it?";
+            if (MessageBoxW(hwnd, msg.c_str(), L"Confirm Overwrite",
                             MB_YESNO | MB_ICONWARNING) != IDYES)
                 return L"";
         }

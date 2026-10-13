@@ -2945,7 +2945,9 @@ static void LBDown_MainArea(HWND hwnd, float mx, float my)
     {
         RECT rc;
         GetClientRect(hwnd, &rc);
-        if (my >= static_cast<float>(rc.bottom) - g_viewState.stripAnimHeight)
+        // Info panel is drawn over the strip; clicks under the panel must reach the panel
+        if (my >= static_cast<float>(rc.bottom) - g_viewState.stripAnimHeight
+            && mx < static_cast<float>(rc.right) - g_viewState.panelAnimWidth)
         {
             g_clickInStrip = true;
             return;

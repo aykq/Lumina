@@ -1035,6 +1035,7 @@ void Renderer::Render(const ViewState& vs, const ImageInfo* info)
     DrawSaveBar(vs);     // Alt orta — kaydedilmemiş değişiklik varsa görünür
     DrawDeleteConfirmDialog(vs, info); // Modal dialog — en üst katman
     DrawResizeDialog(vs);              // Resize modal — en üst katman
+    DrawConvertDialog(vs);
     DrawRotateFreeDialog(vs);          // Serbest döndürme modal — en üst katman
     DrawCropDialog(vs);                // Kırpma modu — en üst katman
 
@@ -1290,6 +1291,22 @@ static void DrawEditIcon(ID2D1HwndRenderTarget* rt, ID2D1SolidColorBrush* brush,
     rt->DrawLine({ nx - sx, ny - sy }, { tipX, tipY }, brush, strokeW);
 }
 
+static void DrawConvertIcon(ID2D1HwndRenderTarget* rt, ID2D1SolidColorBrush* brush,
+                             float cx, float cy, float strokeW)
+{
+    constexpr float half = 8.0f;
+    constexpr float head = 3.4f;
+    constexpr float off  = 4.2f;
+
+    rt->DrawLine({cx - half, cy - off}, {cx + half, cy - off}, brush, strokeW);
+    rt->DrawLine({cx + half, cy - off}, {cx + half - head, cy - off - head}, brush, strokeW);
+    rt->DrawLine({cx + half, cy - off}, {cx + half - head, cy - off + head}, brush, strokeW);
+
+    rt->DrawLine({cx + half, cy + off}, {cx - half, cy + off}, brush, strokeW);
+    rt->DrawLine({cx - half, cy + off}, {cx - half + head, cy + off - head}, brush, strokeW);
+    rt->DrawLine({cx - half, cy + off}, {cx - half + head, cy + off + head}, brush, strokeW);
+}
+
 void Renderer::DrawEditToolbar(const ViewState& vs)
 {
     m_editToolbarVisible = false;
@@ -1312,16 +1329,17 @@ void Renderer::DrawEditToolbar(const ViewState& vs)
     constexpr float kMarginTop = 16.0f;
     constexpr float kStrokeW   = 2.2f;
 
-    // Toolbar genişliği editMoreAlpha ile interpolate: 3 btn (kapalı) → 6 btn (açık)
-    const float collapsedW = kBtnSize * 3.0f + kGap * 2.0f;   // [↺][↻][···]
-    const float expandedW  = kBtnSize * 6.0f + kGap * 5.0f;   // [↺][↻][···][↗][⤢][✂]
+    // Toolbar genişliği editMoreAlpha ile interpolate: 4 btn (kapalı) → 7 btn (açık)
+    const float collapsedW = kBtnSize * 4.0f + kGap * 3.0f;   // [↺][↻][⇄][···]
+    const float expandedW  = kBtnSize * 7.0f + kGap * 6.0f;   // [↺][↻][⇄][···][↗][⤢][✂]
     const float totalW     = collapsedW + (expandedW - collapsedW) * vs.editMoreAlpha;
     const float startX     = kMarginTop;   // sol üst köşe, üst marjinle aynı
     const float btnY       = kMarginTop;
 
     const float btn1X = startX;
     const float btn2X = btn1X + kBtnSize + kGap;
-    const float btn3X = btn2X + kBtnSize + kGap;  // ···
+    const float btnCvX = btn2X + kBtnSize + kGap;
+    const float btn3X = btnCvX + kBtnSize + kGap;  // ···
     const float btn4X = btn3X + kBtnSize + kGap;  // ↗
     const float btn5X = btn4X + kBtnSize + kGap;  // ⤢
     const float btn6X = btn5X + kBtnSize + kGap;  // ✂
@@ -1351,6 +1369,15 @@ void Renderer::DrawEditToolbar(const ViewState& vs)
             vs.editBtnRotRPressed ? m_activeBrush : m_panelBgBrush);
         DrawRotateIcon(m_renderTarget, m_factory, m_whiteBrush,
             btn2X + kBtnSize * 0.5f, btnY + kBtnSize * 0.5f, true, kStrokeW);
+    }
+
+    m_editBtnConvertRect = D2D1::RectF(btnCvX, btnY, btnCvX + kBtnSize, btnY + kBtnSize);
+    {
+        D2D1_ROUNDED_RECT rr = { m_editBtnConvertRect, kBtnRadius, kBtnRadius };
+        m_renderTarget->FillRoundedRectangle(rr,
+            (vs.editBtnConvertPressed || vs.showConvertDialog) ? m_activeBrush : m_panelBgBrush);
+        DrawConvertIcon(m_renderTarget, m_whiteBrush,
+            btnCvX + kBtnSize * 0.5f, btnY + kBtnSize * 0.5f, kStrokeW);
     }
 
     // [3] ✏ Düzenle (genişlet/daralt)
@@ -1415,12 +1442,12 @@ void Renderer::DrawEditToolbar(const ViewState& vs)
     }
 
     // Tooltip — hover'daki butonun altında fade-in etiket
-    if (vs.editToolbarHoverBtn >= 1 && vs.editToolbarHoverBtn <= 6 && m_btnFormat && m_separatorBrush
+    if (vs.editToolbarHoverBtn >= 1 && vs.editToolbarHoverBtn <= 7 && m_btnFormat && m_separatorBrush
         && vs.editToolbarTooltipAlpha > 0.01f)
     {
         static const wchar_t* kTips[]  = { L"Rotate left", L"Rotate right", L"Edit",
-                                            L"Free rotate", L"Resize", L"Crop" };
-        static const float    kTipWs[] = { 110.0f, 116.0f, 72.0f, 110.0f, 82.0f, 72.0f };
+                                            L"Free rotate", L"Resize", L"Crop", L"Convert format" };
+        static const float    kTipWs[] = { 110.0f, 116.0f, 72.0f, 110.0f, 82.0f, 72.0f, 130.0f };
         const int   tipIdx = vs.editToolbarHoverBtn - 1;
         const float tipW   = kTipWs[tipIdx];
         const float tipH   = 26.0f;
@@ -1433,6 +1460,7 @@ void Renderer::DrawEditToolbar(const ViewState& vs)
             case 3: btnCX = btn3X + kBtnSize * 0.5f; break;
             case 4: btnCX = btn4X + kBtnSize * 0.5f; break;
             case 5: btnCX = btn5X + kBtnSize * 0.5f; break;
+            case 7: btnCX = btnCvX + kBtnSize * 0.5f; break;
             default: btnCX = btn6X + kBtnSize * 0.5f; break;
         }
 
@@ -1601,7 +1629,9 @@ void Renderer::DrawDeleteConfirmDialog(const ViewState& vs, const ImageInfo* inf
     m_renderTarget->DrawRoundedRectangle(dlgRR, m_separatorBrush, 1.0f);
 
     // Başlık
-    const wchar_t* title   = isWarning ? L"Cannot Delete" : L"Delete Photo";
+    const bool convertFailed = isWarning && vs.noticeKind == 1;
+    const wchar_t* title   = convertFailed ? L"Conversion Failed"
+                           : isWarning     ? L"Cannot Delete" : L"Delete Photo";
     D2D1_RECT_F titleRect  = D2D1::RectF(dlgLeft + kPadX, dlgTop + kPadY,
                                           dlgRight - kPadX, dlgTop + kPadY + 22.0f);
     m_renderTarget->DrawText(title, static_cast<UINT32>(wcslen(title)),
@@ -1610,7 +1640,12 @@ void Renderer::DrawDeleteConfirmDialog(const ViewState& vs, const ImageInfo* inf
     // Mesaj metni
     const wchar_t* msg;
     std::wstring dynMsg;
-    if (isWarning)
+    if (convertFailed)
+    {
+        msg = L"The image could not be converted.\n"
+              L"Check the destination and try again.";
+    }
+    else if (isWarning)
     {
         msg = L"This photo has unsaved changes.\n"
               L"Save or discard them first.";
@@ -1923,6 +1958,191 @@ void Renderer::DrawResizeDialog(const ViewState& vs)
 
     DrawMainBtn(m_resizeDlgCancelRect, btn1L, btn1R, m_separatorBrush, L"Cancel",  1);
     DrawMainBtn(m_resizeDlgApplyRect,  btn2L, btn2R, m_saveBtnBrush,   L"Apply", 2);
+
+    if (dlayer)
+        m_renderTarget->PopLayer();
+}
+
+void Renderer::DrawConvertDialog(const ViewState& vs)
+{
+    m_convertDlgVisible = false;
+    if (!vs.showConvertDialog) return;
+    if (!m_panelBgBrush || !m_separatorBrush || !m_whiteBrush || !m_grayBrush
+     || !m_overlayBrush  || !m_btnFormat     || !m_labelFormat || !m_valueFormat
+     || !m_activeBrush   || !m_saveBtnBrush) return;
+
+    m_convertDlgVisible = true;
+    m_convertDlgDecRect = m_convertDlgIncRect = m_convertDlgLosslessRect = m_convertDlgBgRect = {};
+
+    bool dlayer = (vs.dialogAlpha < 0.99f) && m_dialogLayer;
+    if (dlayer)
+    {
+        D2D1_LAYER_PARAMETERS lp = D2D1::LayerParameters();
+        lp.opacity = vs.dialogAlpha;
+        m_renderTarget->PushLayer(lp, m_dialogLayer);
+    }
+
+    D2D1_SIZE_F sz = m_renderTarget->GetSize();
+
+    {
+        float op = m_overlayBrush->GetOpacity();
+        m_overlayBrush->SetOpacity(0.72f);
+        m_renderTarget->FillRectangle(D2D1::RectF(0, 0, sz.width, sz.height), m_overlayBrush);
+        m_overlayBrush->SetOpacity(op);
+    }
+
+    constexpr float kDlgW   = 460.0f;
+    constexpr float kDlgH   = 252.0f;
+    constexpr float kRadii  = 12.0f;
+    constexpr float kPadX   = 20.0f;
+    constexpr float kPadY   = 20.0f;
+    constexpr float kBtnH   = 36.0f;
+    constexpr float kBtnGap = 10.0f;
+    constexpr float kRowH   = 32.0f;
+    constexpr float kSmBtn  = 28.0f;
+
+    const float dlgLeft   = (sz.width  - kDlgW) * 0.5f;
+    const float dlgTop    = (sz.height - kDlgH) * 0.5f;
+    const float dlgRight  = dlgLeft + kDlgW;
+    const float dlgBottom = dlgTop  + kDlgH;
+
+    D2D1_ROUNDED_RECT dlgRR = { D2D1::RectF(dlgLeft, dlgTop, dlgRight, dlgBottom), kRadii, kRadii };
+    m_renderTarget->FillRoundedRectangle(dlgRR, m_panelBgBrush);
+    m_renderTarget->DrawRoundedRectangle(dlgRR, m_separatorBrush, 1.0f);
+
+    {
+        const wchar_t* title = L"Convert format";
+        D2D1_RECT_F r = D2D1::RectF(dlgLeft + kPadX, dlgTop + kPadY,
+                                      dlgRight - kPadX, dlgTop + kPadY + 22.0f);
+        m_renderTarget->DrawText(title, static_cast<UINT32>(wcslen(title)),
+                                  m_valueFormat, r, m_whiteBrush);
+    }
+
+    auto Tint = [&](const D2D1_ROUNDED_RECT& rr, float opacity) {
+        float op = m_activeBrush->GetOpacity();
+        m_activeBrush->SetOpacity(opacity);
+        m_renderTarget->FillRoundedRectangle(rr, m_activeBrush);
+        m_activeBrush->SetOpacity(op);
+    };
+
+    {
+        const float rowTop = dlgTop + 58.0f;
+        const float rowH   = 30.0f;
+        const float gap    = 6.0f;
+        const float btnW   = (kDlgW - 2.0f * kPadX - gap * (kConvertFormatCount - 1)) / kConvertFormatCount;
+        for (int i = 0; i < kConvertFormatCount; ++i)
+        {
+            const float x = dlgLeft + kPadX + i * (btnW + gap);
+            m_convertDlgFormatRects[i] = D2D1::RectF(x, rowTop, x + btnW, rowTop + rowH);
+            D2D1_ROUNDED_RECT rr = { m_convertDlgFormatRects[i], 6.0f, 6.0f };
+            const bool active = (vs.convertFormat == i);
+            m_renderTarget->FillRoundedRectangle(rr, active ? m_activeBrush : m_separatorBrush);
+            if (!active && vs.convertDlgHoverBtn == 10 + i) Tint(rr, 0.35f);
+            m_renderTarget->DrawText(kConvertFormats[i].label,
+                static_cast<UINT32>(wcslen(kConvertFormats[i].label)),
+                m_btnFormat, m_convertDlgFormatRects[i], m_whiteBrush);
+        }
+    }
+
+    const ConvertFormatInfo& fi = kConvertFormats[vs.convertFormat];
+    const bool isWebP = (wcscmp(fi.format, L"WebP") == 0);
+    const bool isJpeg = (wcscmp(fi.format, L"JPEG") == 0);
+    const bool hasQuality = fi.defaultQuality > 0;
+    const bool qualityActive = hasQuality && !(isWebP && vs.convertLossless);
+
+    const float labelX = dlgLeft + kPadX;
+    const float labelW = 90.0f;
+    const float row1Top = dlgTop + 108.0f;
+    const float row2Top = dlgTop + 148.0f;
+
+    auto DrawSmallBtn = [&](D2D1_RECT_F& out, float x, float rowTop, const wchar_t* txt, int id) {
+        out = D2D1::RectF(x, rowTop + 2.0f, x + kSmBtn, rowTop + 2.0f + kSmBtn);
+        D2D1_ROUNDED_RECT rr = { out, 6.0f, 6.0f };
+        m_renderTarget->FillRoundedRectangle(rr, m_separatorBrush);
+        if (vs.convertDlgPressedBtn == id)      Tint(rr, 0.6f);
+        else if (vs.convertDlgHoverBtn == id)   Tint(rr, 0.25f);
+        m_renderTarget->DrawText(txt, 1, m_btnFormat, out, m_whiteBrush);
+    };
+    auto DrawToggle = [&](D2D1_RECT_F& out, float x, float rowTop, float w,
+                           const wchar_t* txt, int id, bool on) {
+        out = D2D1::RectF(x, rowTop + 2.0f, x + w, rowTop + 2.0f + kSmBtn);
+        D2D1_ROUNDED_RECT rr = { out, 6.0f, 6.0f };
+        m_renderTarget->FillRoundedRectangle(rr, on ? m_activeBrush : m_separatorBrush);
+        if (!on && vs.convertDlgHoverBtn == id) Tint(rr, 0.35f);
+        m_renderTarget->DrawText(txt, static_cast<UINT32>(wcslen(txt)), m_btnFormat, out, m_whiteBrush);
+    };
+    auto DrawLabel = [&](float rowTop, const wchar_t* txt) {
+        D2D1_RECT_F r = D2D1::RectF(labelX, rowTop, labelX + labelW, rowTop + kRowH);
+        m_renderTarget->DrawText(txt, static_cast<UINT32>(wcslen(txt)), m_labelFormat, r, m_grayBrush);
+    };
+
+    if (!hasQuality)
+    {
+        D2D1_RECT_F r = D2D1::RectF(labelX, row1Top, dlgRight - kPadX, row1Top + kRowH);
+        const wchar_t* msg = L"No extra settings for this format.";
+        m_renderTarget->DrawText(msg, static_cast<UINT32>(wcslen(msg)), m_labelFormat, r, m_grayBrush);
+    }
+    else if (qualityActive)
+    {
+        DrawLabel(row1Top, L"Quality");
+        const float minusX = labelX + labelW + 4.0f;
+        const float valX   = minusX + kSmBtn + 4.0f;
+        const float valW   = 80.0f;
+        const float plusX  = valX + valW + 4.0f;
+        DrawSmallBtn(m_convertDlgDecRect, minusX, row1Top, L"−", 3);
+        wchar_t qBuf[16];
+        _snwprintf_s(qBuf, 16, _TRUNCATE, L"%d", vs.convertQuality);
+        D2D1_RECT_F valR = D2D1::RectF(valX, row1Top, valX + valW, row1Top + kRowH);
+        m_renderTarget->DrawText(qBuf, static_cast<UINT32>(wcslen(qBuf)), m_btnFormat, valR, m_whiteBrush);
+        DrawSmallBtn(m_convertDlgIncRect, plusX, row1Top, L"+", 4);
+    }
+    else
+    {
+        D2D1_RECT_F r = D2D1::RectF(labelX, row1Top, dlgRight - kPadX, row1Top + kRowH);
+        const wchar_t* msg = L"Lossless: no quality setting.";
+        m_renderTarget->DrawText(msg, static_cast<UINT32>(wcslen(msg)), m_labelFormat, r, m_grayBrush);
+    }
+
+    if (isWebP)
+    {
+        DrawLabel(row2Top, L"Mode");
+        DrawToggle(m_convertDlgLosslessRect, labelX + labelW + 4.0f, row2Top, 90.0f,
+                   L"Lossless", 5, vs.convertLossless);
+    }
+    else if (isJpeg && vs.convertHasAlpha)
+    {
+        DrawLabel(row2Top, L"Transparency");
+        DrawToggle(m_convertDlgBgRect, labelX + labelW + 4.0f, row2Top, 110.0f,
+                   vs.convertFlattenBlack ? L"Black fill" : L"White fill", 6, true);
+    }
+
+    const float sepY = dlgBottom - kBtnH - kPadY - 8.0f;
+    m_renderTarget->DrawLine({dlgLeft + kPadX, sepY}, {dlgRight - kPadX, sepY},
+                              m_separatorBrush, 1.0f);
+
+    const float btnTop    = dlgBottom - kPadY - kBtnH;
+    const float btnW      = (kDlgW - 2.0f * kPadX - kBtnGap) * 0.5f;
+    const float btn1L     = dlgLeft + kPadX;
+    const float btn2L     = btn1L + btnW + kBtnGap;
+
+    auto DrawMainBtn = [&](D2D1_RECT_F& out, float left, float right,
+                            ID2D1SolidColorBrush* bg, const wchar_t* lbl, int id) {
+        out = D2D1::RectF(left, btnTop, right, btnTop + kBtnH);
+        D2D1_ROUNDED_RECT rr = { out, 7.0f, 7.0f };
+        m_renderTarget->FillRoundedRectangle(rr, bg);
+        if (vs.convertDlgPressedBtn == id) {
+            float op = m_overlayBrush->GetOpacity();
+            m_overlayBrush->SetOpacity(0.20f);
+            m_renderTarget->FillRoundedRectangle(rr, m_overlayBrush);
+            m_overlayBrush->SetOpacity(op);
+        } else if (vs.convertDlgHoverBtn == id) {
+            Tint(rr, 0.25f);
+        }
+        m_renderTarget->DrawText(lbl, static_cast<UINT32>(wcslen(lbl)), m_btnFormat, out, m_whiteBrush);
+    };
+
+    DrawMainBtn(m_convertDlgCancelRect, btn1L, btn1L + btnW, m_separatorBrush, L"Cancel", 1);
+    DrawMainBtn(m_convertDlgApplyRect,  btn2L, dlgRight - kPadX, m_saveBtnBrush, L"Convert…", 2);
 
     if (dlayer)
         m_renderTarget->PopLayer();

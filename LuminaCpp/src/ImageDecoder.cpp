@@ -2029,13 +2029,283 @@ static void PatchExifOrientation(std::vector<uint8_t>& exif, uint16_t newVal)
     }
 }
 
+static uint32_t ReadBE32(const uint8_t* p)
+{
+    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+}
+
+static std::vector<uint8_t> NormalizeExifTiff(const uint8_t* d, size_t n)
+{
+    if (n >= 6 && memcmp(d, "Exif\0\0", 6) == 0) { d += 6; n -= 6; }
+    else if (n >= 4)
+    {
+        const size_t t = static_cast<size_t>(4) + ReadBE32(d);
+        if (t + 8 <= n && ((d[t] == 'I' && d[t + 1] == 'I') || (d[t] == 'M' && d[t + 1] == 'M')))
+        { d += t; n -= t; }
+    }
+    if (n < 8) return {};
+    if (!((d[0] == 'I' && d[1] == 'I') || (d[0] == 'M' && d[1] == 'M'))) return {};
+    return std::vector<uint8_t>(d, d + n);
+}
+
+// Orientation is reset to 1 because the saved pixels are already upright.
+static std::vector<uint8_t> ExtractExifTiff(const std::wstring& srcPath)
+{
+    if (srcPath.empty()) return {};
+    const auto b = ReadFileBytes(srcPath);
+    const size_t n = b.size();
+    std::vector<uint8_t> out;
+
+    if (n > 12 && b[0] == 0xFF && b[1] == 0xD8)
+    {
+        size_t p = 2;
+        while (p + 4 <= n && b[p] == 0xFF)
+        {
+            const uint8_t m = b[p + 1];
+            if (m == 0xDA || m == 0xD9) break;
+            if (m == 0x01 || (m >= 0xD0 && m <= 0xD7)) { p += 2; continue; }
+            const size_t len = (size_t(b[p + 2]) << 8) | b[p + 3];
+            if (len < 2 || p + 2 + len > n) break;
+            if (m == 0xE1 && len >= 8 && memcmp(&b[p + 4], "Exif\0\0", 6) == 0)
+            { out = NormalizeExifTiff(&b[p + 4], len - 2); break; }
+            p += 2 + len;
+        }
+    }
+    else if (n > 8 && memcmp(b.data(), "\x89PNG\r\n\x1a\n", 8) == 0)
+    {
+        size_t p = 8;
+        while (p + 12 <= n)
+        {
+            const uint32_t len = ReadBE32(&b[p]);
+            if (p + 12 + static_cast<size_t>(len) > n) break;
+            if (memcmp(&b[p + 4], "eXIf", 4) == 0)
+            { out = NormalizeExifTiff(&b[p + 8], len); break; }
+            p += 12 + static_cast<size_t>(len);
+        }
+    }
+    else if (n > 12 && memcmp(&b[0], "RIFF", 4) == 0 && memcmp(&b[8], "WEBP", 4) == 0)
+    {
+        WebPData wd = { b.data(), n };
+        if (WebPDemuxer* dmx = WebPDemux(&wd))
+        {
+            WebPChunkIterator ci{};
+            if (WebPDemuxGetChunk(dmx, "EXIF", 1, &ci))
+            {
+                out = NormalizeExifTiff(ci.chunk.bytes, ci.chunk.size);
+                WebPDemuxReleaseChunkIterator(&ci);
+            }
+            WebPDemuxDelete(dmx);
+        }
+    }
+    else if (n > 12 && memcmp(&b[4], "ftyp", 4) == 0)
+    {
+        if (heif_context* ctx = heif_context_alloc())
+        {
+            if (heif_context_read_from_memory_without_copy(ctx, b.data(), n, nullptr).code == heif_error_Ok)
+            {
+                heif_image_handle* h = nullptr;
+                if (heif_context_get_primary_image_handle(ctx, &h).code == heif_error_Ok)
+                {
+                    if (heif_image_handle_get_number_of_metadata_blocks(h, "Exif") > 0)
+                    {
+                        heif_item_id id = 0;
+                        heif_image_handle_get_list_of_metadata_block_IDs(h, "Exif", &id, 1);
+                        const size_t sz = heif_image_handle_get_metadata_size(h, id);
+                        std::vector<uint8_t> buf(sz);
+                        if (sz > 0 && heif_image_handle_get_metadata(h, id, buf.data()).code == heif_error_Ok)
+                            out = NormalizeExifTiff(buf.data(), sz);
+                    }
+                    heif_image_handle_release(h);
+                }
+            }
+            heif_context_free(ctx);
+        }
+    }
+
+    if (!out.empty()) PatchExifOrientation(out, 1);
+    return out;
+}
+
+static bool JpegHasExif(const std::vector<uint8_t>& b)
+{
+    size_t p = 2;
+    while (p + 4 <= b.size() && b[p] == 0xFF)
+    {
+        const uint8_t m = b[p + 1];
+        if (m == 0xDA || m == 0xD9) break;
+        const size_t len = (size_t(b[p + 2]) << 8) | b[p + 3];
+        if (len < 2 || p + 2 + len > b.size()) break;
+        if (m == 0xE1 && len >= 8 && memcmp(&b[p + 4], "Exif\0\0", 6) == 0) return true;
+        p += 2 + len;
+    }
+    return false;
+}
+
+static void JpegInsertExif(std::vector<uint8_t>& b, const std::vector<uint8_t>& tiff)
+{
+    if (b.size() < 6 || b[0] != 0xFF || b[1] != 0xD8 || tiff.empty()) return;
+    if (tiff.size() + 8 > 0xFFFF || JpegHasExif(b)) return;
+    size_t pos = 2;
+    if (b[2] == 0xFF && b[3] == 0xE0) pos = 4 + ((size_t(b[4]) << 8) | b[5]);
+    if (pos > b.size()) return;
+
+    const size_t len = 2 + 6 + tiff.size();
+    std::vector<uint8_t> seg = { 0xFF, 0xE1, uint8_t(len >> 8), uint8_t(len & 0xFF),
+                                 'E', 'x', 'i', 'f', 0, 0 };
+    seg.insert(seg.end(), tiff.begin(), tiff.end());
+    b.insert(b.begin() + pos, seg.begin(), seg.end());
+}
+
+static uint32_t Crc32(const uint8_t* d, size_t n)
+{
+    static uint32_t table[256];
+    static bool ready = false;
+    if (!ready)
+    {
+        for (uint32_t i = 0; i < 256; ++i)
+        {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            table[i] = c;
+        }
+        ready = true;
+    }
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; ++i) c = table[(c ^ d[i]) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+
+static void PngInsertExif(std::vector<uint8_t>& b, const std::vector<uint8_t>& tiff)
+{
+    constexpr size_t kAfterIhdr = 8 + 12 + 13;
+    if (b.size() < kAfterIhdr || memcmp(b.data(), "\x89PNG\r\n\x1a\n", 8) != 0 || tiff.empty()) return;
+
+    std::vector<uint8_t> chunk;
+    const uint32_t len = static_cast<uint32_t>(tiff.size());
+    chunk.insert(chunk.end(), { uint8_t(len >> 24), uint8_t(len >> 16), uint8_t(len >> 8), uint8_t(len) });
+    chunk.insert(chunk.end(), { 'e', 'X', 'I', 'f' });
+    chunk.insert(chunk.end(), tiff.begin(), tiff.end());
+    const uint32_t crc = Crc32(chunk.data() + 4, 4 + tiff.size());
+    chunk.insert(chunk.end(), { uint8_t(crc >> 24), uint8_t(crc >> 16), uint8_t(crc >> 8), uint8_t(crc) });
+    b.insert(b.begin() + kAfterIhdr, chunk.begin(), chunk.end());
+}
+
+// Rewrites a finished file through a temp file so a failed write cannot truncate the output.
+static bool RewriteFileBytes(const std::wstring& path, const std::vector<uint8_t>& bytes)
+{
+    const std::wstring tmp = path + L".lumtmp";
+    if (!WriteAllBytes(tmp, bytes.data(), static_cast<DWORD>(bytes.size()))) { DeleteFileW(tmp.c_str()); return false; }
+    if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    { DeleteFileW(tmp.c_str()); return false; }
+    return true;
+}
+
+static void ApplyExifToWicFrame(IWICBitmapFrameEncode* frame, const std::vector<uint8_t>& t)
+{
+    IWICMetadataQueryWriter* qw = nullptr;
+    if (!frame || t.size() < 8 || FAILED(frame->GetMetadataQueryWriter(&qw)) || !qw) return;
+
+    const bool le = (t[0] == 'I');
+    const size_t sz = t.size();
+    auto rd16 = [&](size_t o) -> uint16_t {
+        if (o + 2 > sz) return 0;
+        return le ? uint16_t(t[o] | (t[o + 1] << 8)) : uint16_t((t[o] << 8) | t[o + 1]);
+    };
+    auto rd32 = [&](size_t o) -> uint32_t {
+        if (o + 4 > sz) return 0;
+        return le ? (uint32_t(t[o]) | uint32_t(t[o + 1]) << 8 | uint32_t(t[o + 2]) << 16 | uint32_t(t[o + 3]) << 24)
+                  : (uint32_t(t[o]) << 24 | uint32_t(t[o + 1]) << 16 | uint32_t(t[o + 2]) << 8 | uint32_t(t[o + 3]));
+    };
+
+    enum Scope { kIfd0, kExif, kGps };
+    auto copyIfd = [&](auto&& self, size_t ifd, const wchar_t* prefix, Scope scope) -> void
+    {
+        if (ifd + 2 > sz) return;
+        const uint16_t count = rd16(ifd);
+        for (uint16_t i = 0; i < count; ++i)
+        {
+            const size_t e = ifd + 2 + static_cast<size_t>(i) * 12;
+            if (e + 12 > sz) break;
+            const uint16_t tag = rd16(e), type = rd16(e + 2);
+            const uint32_t cnt = rd32(e + 4);
+
+            if (scope == kIfd0 && tag == 0x8769) { self(self, rd32(e + 8), L"/ifd/exif", kExif); continue; }
+            if (scope == kIfd0 && tag == 0x8825) { self(self, rd32(e + 8), L"/ifd/gps", kGps); continue; }
+            if (scope == kIfd0 && tag != 0x010E && tag != 0x010F && tag != 0x0110 &&
+                tag != 0x0131 && tag != 0x0132 && tag != 0x013B && tag != 0x8298) continue;
+            if (scope == kExif && (tag == 0x927C || tag == 0xA005 || tag == 0x8769)) continue;
+
+            static const size_t kUnit[] = { 0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8 };
+            if (type < 1 || type > 10 || cnt == 0) continue;
+            const size_t total = kUnit[type] * cnt;
+            size_t at = e + 8;
+            if (total > 4) at = rd32(e + 8);
+            if (at + total > sz || total > 4096) continue;
+
+            PROPVARIANT pv;
+            PropVariantInit(&pv);
+            std::vector<uint16_t> v16;
+            std::vector<uint32_t> v32;
+            std::vector<uint64_t> v64;
+            std::vector<uint8_t>  v8(t.begin() + at, t.begin() + at + total);
+            std::vector<char>     str;
+            bool ok = true;
+
+            switch (type)
+            {
+            case 2:
+                str.assign(v8.begin(), v8.end());
+                str.push_back('\0');
+                pv.vt = VT_LPSTR;
+                pv.pszVal = str.data();
+                break;
+            case 1:
+                if (cnt == 1) { pv.vt = VT_UI1; pv.bVal = v8[0]; }
+                else { pv.vt = VT_VECTOR | VT_UI1; pv.caub.cElems = cnt; pv.caub.pElems = v8.data(); }
+                break;
+            case 7:
+                pv.vt = VT_BLOB;
+                pv.blob.cbSize = static_cast<ULONG>(total);
+                pv.blob.pBlobData = v8.data();
+                break;
+            case 3:
+                for (uint32_t k = 0; k < cnt; ++k) v16.push_back(rd16(at + k * 2));
+                if (cnt == 1) { pv.vt = VT_UI2; pv.uiVal = v16[0]; }
+                else { pv.vt = VT_VECTOR | VT_UI2; pv.caui.cElems = cnt; pv.caui.pElems = v16.data(); }
+                break;
+            case 4:
+                for (uint32_t k = 0; k < cnt; ++k) v32.push_back(rd32(at + k * 4));
+                if (cnt == 1) { pv.vt = VT_UI4; pv.ulVal = v32[0]; }
+                else { pv.vt = VT_VECTOR | VT_UI4; pv.caul.cElems = cnt; pv.caul.pElems = reinterpret_cast<ULONG*>(v32.data()); }
+                break;
+            case 5:
+                for (uint32_t k = 0; k < cnt; ++k)
+                    v64.push_back(uint64_t(rd32(at + k * 8)) | (uint64_t(rd32(at + k * 8 + 4)) << 32));
+                if (cnt == 1) { pv.vt = VT_UI8; pv.uhVal.QuadPart = v64[0]; }
+                else { pv.vt = VT_VECTOR | VT_UI8; pv.cauh.cElems = cnt; pv.cauh.pElems = reinterpret_cast<ULARGE_INTEGER*>(v64.data()); }
+                break;
+            default:
+                ok = false;
+            }
+            if (!ok) continue;
+
+            const std::wstring name = std::wstring(prefix) + L"/{ushort=" + std::to_wstring(tag) + L"}";
+            qw->SetMetadataByName(name.c_str(), &pv);
+        }
+    };
+
+    copyIfd(copyIfd, rd32(4), L"/ifd", kIfd0);
+    qw->Release();
+}
+
 // WIC encoder: JPEG, PNG, BMP, TIFF
 // sourcePath: dolu ise kaynak dosyanın EXIF/metadata blokları kopyalanır ve
 //             Orientation etiketi 1 (normal) olarak sıfırlanır (pikseller zaten döndürülmüş).
 // Aynı yola yazarken temp dosya kullanılır (dosya kilidi önleme).
 static bool SaveImageWIC(const std::wstring& path, const GUID& fmt,
                           const uint8_t* bgraStraight, UINT width, UINT height,
-                          const std::wstring& sourcePath = L"")
+                          const std::wstring& sourcePath = L"", int jpegQuality = 0,
+                          const std::vector<uint8_t>& exifTiff = std::vector<uint8_t>())
 {
     IWICImagingFactory* wic = nullptr;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
@@ -2091,7 +2361,7 @@ static bool SaveImageWIC(const std::wstring& path, const GUID& fmt,
             opt.pstrName = const_cast<OLECHAR*>(L"ImageQuality");
             VARIANT var{};
             var.vt     = VT_R4;
-            var.fltVal = 0.92f;
+            var.fltVal = jpegQuality > 0 ? jpegQuality / 100.0f : 0.92f;
             props->Write(1, &opt, &var);
         }
         frame->Initialize(props);  // props (or nullptr) geçirilmeli; Release'den önce
@@ -2102,7 +2372,9 @@ static bool SaveImageWIC(const std::wstring& path, const GUID& fmt,
         frame->SetPixelFormat(&pixFmt);
 
         // Metadata kopyala (JPEG / TIFF)
-        if (blkRdr)
+        if (isTiff && !exifTiff.empty())
+            ApplyExifToWicFrame(frame, exifTiff);
+        else if (blkRdr)
         {
             IWICMetadataBlockWriter* blkWr = nullptr;
             if (SUCCEEDED(frame->QueryInterface(IID_IWICMetadataBlockWriter,
@@ -2173,7 +2445,8 @@ cleanup_early:
 // WebP encoder: libwebp (sourcePath varsa EXIF chunk kopyalanır)
 static bool SaveImageWebP(const std::wstring& path, const uint8_t* bgraStraight,
                            UINT width, UINT height,
-                           const std::wstring& sourcePath = L"")
+                           const std::vector<uint8_t>& exifChunk,
+                           int quality = 0, bool lossless = false)
 {
     // BGRA → RGBA
     std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4);
@@ -2184,32 +2457,15 @@ static bool SaveImageWebP(const std::wstring& path, const uint8_t* bgraStraight,
         rgba[i * 4 + 3] = bgraStraight[i * 4 + 3];
     }
     uint8_t* output = nullptr;
-    size_t outputSize = WebPEncodeRGBA(rgba.data(), static_cast<int>(width),
-                                       static_cast<int>(height),
-                                       static_cast<int>(width * 4), 90.0f, &output);
+    size_t outputSize = lossless
+        ? WebPEncodeLosslessRGBA(rgba.data(), static_cast<int>(width),
+                                 static_cast<int>(height),
+                                 static_cast<int>(width * 4), &output)
+        : WebPEncodeRGBA(rgba.data(), static_cast<int>(width),
+                         static_cast<int>(height),
+                         static_cast<int>(width * 4),
+                         quality > 0 ? static_cast<float>(quality) : 90.0f, &output);
     if (!output || outputSize == 0) { WebPFree(output); return false; }
-
-    // Kaynak WebP'den EXIF chunk'ı çıkar
-    std::vector<uint8_t> exifChunk;
-    if (!sourcePath.empty())
-    {
-        auto srcData = ReadFileBytes(sourcePath);
-        if (!srcData.empty())
-        {
-            WebPData wd = { srcData.data(), srcData.size() };
-            WebPDemuxer* dmx = WebPDemux(&wd);
-            if (dmx)
-            {
-                WebPChunkIterator ci{};
-                if (WebPDemuxGetChunk(dmx, "EXIF", 1, &ci))
-                {
-                    exifChunk.assign(ci.chunk.bytes, ci.chunk.bytes + ci.chunk.size);
-                    WebPDemuxReleaseChunkIterator(&ci);
-                }
-                WebPDemuxDelete(dmx);
-            }
-        }
-    }
 
     bool ok = false;
     if (exifChunk.empty())
@@ -2219,9 +2475,6 @@ static bool SaveImageWebP(const std::wstring& path, const uint8_t* bgraStraight,
     }
     else
     {
-        // Orientation'ı 1'e patch'le, WebPMux ile EXIF ekle
-        PatchExifOrientation(exifChunk, 1);
-
         WebPData encodedWebP = { output, outputSize };
         WebPMux* mux = WebPMuxCreate(&encodedWebP, 0);
         if (mux)
@@ -2247,7 +2500,7 @@ static bool SaveImageWebP(const std::wstring& path, const uint8_t* bgraStraight,
 // HEIC encoder: libheif (HEVC; AV1 fallback)
 static bool SaveImageHEIC(const std::wstring& path, const uint8_t* bgraStraight,
                            UINT width, UINT height,
-                           const std::wstring& sourcePath = L"")
+                           const std::vector<uint8_t>& exifTiff, int quality = 0)
 {
     heif_context* ctx = heif_context_alloc();
     if (!ctx) return false;
@@ -2258,7 +2511,7 @@ static bool SaveImageHEIC(const std::wstring& path, const uint8_t* bgraStraight,
         err = heif_context_get_encoder_for_format(ctx, heif_compression_AV1, &enc);
     if (err.code != heif_error_Ok) { heif_context_free(ctx); return false; }
 
-    heif_encoder_set_lossy_quality(enc, 85);
+    heif_encoder_set_lossy_quality(enc, quality > 0 ? quality : 85);
 
     bool hasAlpha = false;
     for (UINT i = 0; i < width * height; ++i)
@@ -2352,45 +2605,8 @@ static bool SaveImageHEIC(const std::wstring& path, const uint8_t* bgraStraight,
     heif_image_release(img);
     heif_encoder_release(enc);
 
-    // EXIF: kaynak HEIC'ten al, Orientation'ı 1'e patch'le, yeni dosyaya ekle
-    if (err.code == heif_error_Ok && outHandle && !sourcePath.empty())
-    {
-        heif_context* srcCtx = heif_context_alloc();
-        if (srcCtx)
-        {
-            char srcUtf8[MAX_PATH * 4]{};
-            WideCharToMultiByte(CP_UTF8, 0, sourcePath.c_str(), -1,
-                                srcUtf8, static_cast<int>(sizeof(srcUtf8)), nullptr, nullptr);
-            if (heif_context_read_from_file(srcCtx, srcUtf8, nullptr).code == heif_error_Ok)
-            {
-                heif_image_handle* srcHandle = nullptr;
-                if (heif_context_get_primary_image_handle(srcCtx, &srcHandle).code == heif_error_Ok)
-                {
-                    int nMeta = heif_image_handle_get_number_of_metadata_blocks(srcHandle, "Exif");
-                    if (nMeta > 0)
-                    {
-                        heif_item_id metaId = 0;
-                        heif_image_handle_get_list_of_metadata_block_IDs(srcHandle, "Exif", &metaId, 1);
-                        size_t exifSz = heif_image_handle_get_metadata_size(srcHandle, metaId);
-                        if (exifSz > 0)
-                        {
-                            std::vector<uint8_t> exifBuf(exifSz);
-                            if (heif_image_handle_get_metadata(srcHandle, metaId, exifBuf.data()).code
-                                == heif_error_Ok)
-                            {
-                                PatchExifOrientation(exifBuf, 1);
-                                heif_context_add_exif_metadata(ctx, outHandle,
-                                                               exifBuf.data(),
-                                                               static_cast<int>(exifSz));
-                            }
-                        }
-                    }
-                    heif_image_handle_release(srcHandle);
-                }
-            }
-            heif_context_free(srcCtx);
-        }
-    }
+    if (err.code == heif_error_Ok && outHandle && !exifTiff.empty())
+        heif_context_add_exif_metadata(ctx, outHandle, exifTiff.data(), static_cast<int>(exifTiff.size()));
 
     bool ok = false;
     if (err.code == heif_error_Ok) {
@@ -2415,7 +2631,7 @@ static bool SaveImageJXL(const std::wstring&, const uint8_t*, UINT, UINT)
 // AVIF encoder: libavif (sourcePath varsa EXIF kopyalanır)
 static bool SaveImageAVIF(const std::wstring& path, const uint8_t* bgraStraight,
                            UINT width, UINT height,
-                           const std::wstring& sourcePath = L"")
+                           const std::wstring& sourcePath = L"", int quality = 0)
 {
     bool hasAlpha = false;
     for (UINT i = 0; i < width * height; ++i)
@@ -2468,7 +2684,7 @@ static bool SaveImageAVIF(const std::wstring& path, const uint8_t* bgraStraight,
 
     avifEncoder* encoder = avifEncoderCreate();
     if (!encoder) { avifImageDestroy(img); return false; }
-    encoder->quality      = 80;
+    encoder->quality      = quality > 0 ? quality : 80;
     encoder->qualityAlpha = 100;  // AVIF_QUALITY_LOSSLESS
     encoder->speed        = AVIF_SPEED_DEFAULT;
 
@@ -2487,7 +2703,7 @@ static bool SaveImageAVIF(const std::wstring& path, const uint8_t* bgraStraight,
 
 bool SaveImage(const std::wstring& path, const std::wstring& format,
                const uint8_t* bgraPreMul, UINT width, UINT height,
-               const std::wstring& sourcePath)
+               const std::wstring& sourcePath, const SaveOptions& opts)
 {
     if (!bgraPreMul || width == 0 || height == 0) return false;
 
@@ -2496,18 +2712,61 @@ bool SaveImage(const std::wstring& path, const std::wstring& format,
     std::vector<uint8_t> straight(bgraPreMul, bgraPreMul + static_cast<size_t>(pixCount) * 4);
     UnpremultiplyInPlace(straight.data(), pixCount);
 
+    if (format == L"JPEG")
+    {
+        const int bg = opts.flattenBlack ? 0 : 255;
+        uint8_t* p = straight.data();
+        for (UINT i = 0; i < pixCount; ++i, p += 4)
+        {
+            const int a = p[3];
+            if (a == 255) continue;
+            p[0] = static_cast<uint8_t>((p[0] * a + bg * (255 - a) + 127) / 255);
+            p[1] = static_cast<uint8_t>((p[1] * a + bg * (255 - a) + 127) / 255);
+            p[2] = static_cast<uint8_t>((p[2] * a + bg * (255 - a) + 127) / 255);
+            p[3] = 255;
+        }
+    }
+
     const uint8_t* px = straight.data();
-    if (format == L"JPEG") return SaveImageWIC(path, GUID_ContainerFormatJpeg, px, width, height, sourcePath);
-    if (format == L"PNG")  return SaveImageWIC(path, GUID_ContainerFormatPng,  px, width, height);
+    const std::vector<uint8_t> exif = ExtractExifTiff(sourcePath);
+
+    if (format == L"JPEG")
+    {
+        if (!SaveImageWIC(path, GUID_ContainerFormatJpeg, px, width, height, sourcePath, opts.quality)) return false;
+        if (!exif.empty())
+        {
+            auto bytes = ReadFileBytes(path);
+            if (!bytes.empty() && !JpegHasExif(bytes))
+            {
+                JpegInsertExif(bytes, exif);
+                RewriteFileBytes(path, bytes);
+            }
+        }
+        return true;
+    }
+    if (format == L"PNG")
+    {
+        if (!SaveImageWIC(path, GUID_ContainerFormatPng, px, width, height)) return false;
+        if (!exif.empty())
+        {
+            auto bytes = ReadFileBytes(path);
+            if (!bytes.empty())
+            {
+                PngInsertExif(bytes, exif);
+                RewriteFileBytes(path, bytes);
+            }
+        }
+        return true;
+    }
     if (format == L"BMP")  return SaveImageWIC(path, GUID_ContainerFormatBmp,  px, width, height);
     if (format == L"TIFF" || format == L"TIF")
-                           return SaveImageWIC(path, GUID_ContainerFormatTiff, px, width, height, sourcePath);
+                           return SaveImageWIC(path, GUID_ContainerFormatTiff, px, width, height, sourcePath, 0, exif);
     if (format == L"WebP" || format == L"WEBP")
-                           return SaveImageWebP(path, px, width, height, sourcePath);
+                           return SaveImageWebP(path, px, width, height, exif, opts.quality, opts.lossless);
     if (format == L"HEIC" || format == L"HEIF")
-                           return SaveImageHEIC(path, px, width, height, sourcePath);
+                           return SaveImageHEIC(path, px, width, height, exif, opts.quality);
     if (format == L"JXL")  return SaveImageJXL(path,  px, width, height);
-    if (format == L"AVIF") return SaveImageAVIF(path, px, width, height, sourcePath);
+    if (format == L"AVIF") return SaveImageAVIF(path, px, width, height, sourcePath, opts.quality);
 
     // Bilinmeyen format → PNG olarak kaydet
     return SaveImageWIC(path, GUID_ContainerFormatPng, px, width, height);

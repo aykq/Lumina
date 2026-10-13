@@ -9,6 +9,7 @@
 #include <vector>
 #include <map>
 #include <deque>
+#include <iterator>
 #include "ImageDecoder.h"
 
 // Direct2D, DirectWrite ve WIC kütüphanelerini otomatik linkle
@@ -22,6 +23,23 @@ namespace ArrowLayout {
     constexpr float PillH  = 80.0f;  // pill yüksekliği (sadece görsel)
     constexpr float Radius = 8.0f;   // köşe yarıçapı
 }
+
+struct ConvertFormatInfo
+{
+    const wchar_t* label;
+    const wchar_t* format;
+    const wchar_t* ext;
+    int            defaultQuality;
+};
+inline constexpr ConvertFormatInfo kConvertFormats[] = {
+    { L"JPEG", L"JPEG", L"jpg",  92 },
+    { L"PNG",  L"PNG",  L"png",   0 },
+    { L"WebP", L"WebP", L"webp", 90 },
+    { L"HEIC", L"HEIC", L"heic", 85 },
+    { L"BMP", L"BMP",  L"bmp",   0 },
+    { L"TIFF", L"TIFF", L"tiff",  0 },
+};
+inline constexpr int kConvertFormatCount = static_cast<int>(std::size(kConvertFormats));
 
 // Info panel boyutları — hem Renderer hem main.cpp tarafından kullanılır
 namespace PanelLayout {
@@ -131,7 +149,7 @@ struct ViewState
     bool  editBtnRotRPressed    = false;  // ↻ (CW)  butonu basılı
     bool  editBtnRotFreePressed = false;  // serbest döndür butonu basılı
     bool  editBtnResizePressed  = false;  // Resize butonu basılı (press highlight)
-    int   editToolbarHoverBtn   = 0;      // 0=yok, 1=CCW, 2=CW, 3=Araçlar, 4=Free, 5=Resize, 6=Kırp
+    int   editToolbarHoverBtn   = 0;      // 0=yok, 1=CCW, 2=CW, 3=Araçlar, 4=Free, 5=Resize, 6=Kırp, 7=Dönüştür
     float editToolbarTooltipAlpha = 0.0f; // tooltip fade-in opaklığı (0=gizli, 1=tam)
     bool  mapAttribHover       = false;  // imleç harita "i" butonunun üstünde
     bool  mapAttribOpen        = false;  // OSM atıf yazısı açık (hover gecikmesi doldu ya da tıklandı)
@@ -157,6 +175,18 @@ struct ViewState
     int   resizeDlgHoverBtn    = 0;     // hover edilen buton ID (0=yok)
     int   resizeDlgPressedBtn  = 0;     // basılı buton ID
 
+    // Convert dialog button IDs (Renderer rects and main.cpp hit tests must agree):
+    // 1=cancel 2=convert 3=quality- 4=quality+ 5=lossless 6=fill color 10+i=format i
+    bool  showConvertDialog    = false;
+    int   convertFormat        = 0;
+    int   convertQuality       = 92;
+    bool  convertLossless      = false;
+    bool  convertFlattenBlack  = false;
+    bool  convertHasAlpha      = false;
+    int   convertDlgHoverBtn   = 0;
+    int   convertDlgPressedBtn = 0;
+    bool  editBtnConvertPressed = false;
+
     // Save bar buton durumları (0=yok, 1=Kaydet, 2=Kaydetme, 3=Ayrı Kaydet)
     int   saveBarHover         = 0;
     int   saveBarPressedBtn    = 0;
@@ -164,6 +194,7 @@ struct ViewState
     // Silme onay dialogu
     bool  showDeleteConfirmDialog  = false;  // "Geri Dönüşüm Kutusu'na taşı?" onay ekranı
     bool  showUnsavedWarningDialog = false;  // "Kaydedilmemiş değişiklik" uyarı ekranı
+    int   noticeKind               = 0;      // 1 = conversion failed; reset to 0 wherever the unsaved warning is raised
     int   deleteDlgHoverBtn        = 0;      // 0=yok, 1=İptal/Tamam, 2=Sil
     int   deleteDlgPressedBtn      = 0;      // basılı buton (press highlight)
 
@@ -306,6 +337,16 @@ public:
     D2D1_RECT_F GetResizeDlgHIncRect()     const { return m_resizeDlgHIncRect; }
     D2D1_RECT_F GetResizeDlgLockRect()     const { return m_resizeDlgLockRect; }
 
+    D2D1_RECT_F GetEditBtnConvertRect()    const { return m_editBtnConvertRect; }
+    bool        IsConvertDialogVisible()    const { return m_convertDlgVisible; }
+    D2D1_RECT_F GetConvertDlgCancelRect()   const { return m_convertDlgCancelRect; }
+    D2D1_RECT_F GetConvertDlgApplyRect()    const { return m_convertDlgApplyRect; }
+    D2D1_RECT_F GetConvertDlgDecRect()      const { return m_convertDlgDecRect; }
+    D2D1_RECT_F GetConvertDlgIncRect()      const { return m_convertDlgIncRect; }
+    D2D1_RECT_F GetConvertDlgLosslessRect() const { return m_convertDlgLosslessRect; }
+    D2D1_RECT_F GetConvertDlgBgRect()       const { return m_convertDlgBgRect; }
+    D2D1_RECT_F GetConvertDlgFormatRect(int i) const { return m_convertDlgFormatRects[i]; }
+
     // Silme onay dialogu buton rect'leri — WndProc hit testi için
     D2D1_RECT_F GetDlgCancelRect() const { return m_dlgCancelRect; }
     D2D1_RECT_F GetDlgDeleteRect() const { return m_dlgDeleteRect; }
@@ -361,6 +402,7 @@ private:
     void DrawDeleteConfirmDialog(const ViewState& vs, const ImageInfo* info);
     // Yeniden boyutlandır dialogu
     void DrawResizeDialog(const ViewState& vs);
+    void DrawConvertDialog(const ViewState& vs);
     // Serbest döndürme dialogu
     void DrawRotateFreeDialog(const ViewState& vs);
     // Kırpma dialogu
@@ -470,6 +512,16 @@ private:
     D2D1_RECT_F m_resizeDlgHIncRect     = {};
     D2D1_RECT_F m_resizeDlgLockRect     = {};
     bool        m_resizeDlgVisible      = false;
+
+    D2D1_RECT_F m_editBtnConvertRect      = {};
+    D2D1_RECT_F m_convertDlgCancelRect     = {};
+    D2D1_RECT_F m_convertDlgApplyRect      = {};
+    D2D1_RECT_F m_convertDlgDecRect        = {};
+    D2D1_RECT_F m_convertDlgIncRect        = {};
+    D2D1_RECT_F m_convertDlgLosslessRect   = {};
+    D2D1_RECT_F m_convertDlgBgRect         = {};
+    D2D1_RECT_F m_convertDlgFormatRects[kConvertFormatCount] = {};
+    bool        m_convertDlgVisible        = false;
 
     // Serbest döndürme dialog rect'leri — DrawRotateFreeDialog her çizimde günceller
     D2D1_RECT_F m_rotFreeDlgCoarseDecRect = {};  // −1°

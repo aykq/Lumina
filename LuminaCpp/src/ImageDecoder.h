@@ -82,6 +82,14 @@ bool ExtractHEICEmbeddedPreview(const std::wstring& path,
 // sourcePath: EXIF/metadata kopyalamak için kaynak dosya yolu; boşsa metadata kopyalanmaz.
 //   JPEG ve TIFF için orijinal metadata blokları kopyalanır, Orientation=1'e sıfırlanır.
 // Başarılıysa true döner.
+struct SaveOptions
+{
+    int  quality       = 0;      // 0 means the format's default quality, not the lowest
+    bool lossless      = false;
+    bool flattenBlack  = false;
+};
+
 bool SaveImage(const std::wstring& path, const std::wstring& format,
                const uint8_t* bgraPreMul, UINT width, UINT height,
-               const std::wstring& sourcePath = L"");
+               const std::wstring& sourcePath = L"",
+               const SaveOptions& opts = SaveOptions{});

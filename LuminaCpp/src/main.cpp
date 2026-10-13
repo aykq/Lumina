@@ -137,6 +137,7 @@ struct SaveDoneResult
 {
     bool         success   = false;
     bool         isSaveAs  = false;
+    bool         isConvert = false;  // must never retarget g_edit or clear the dirty state
     std::wstring savedPath;    // kaydedilen yol
     std::wstring format;       // kullanılan format
     std::wstring origPath;     // SaveAs öncesi orijinal yol (cache eviction için)
@@ -2110,6 +2111,7 @@ static void DoDelete(HWND hwnd)
 
     if (g_edit.isDirty)
     {
+        g_viewState.noticeKind = 0;
         g_viewState.showUnsavedWarningDialog = true;
         g_viewState.dialogAlpha = 0.0f;
         QueryPerformanceCounter(&g_dialogFadeLastTime);
@@ -2194,6 +2196,137 @@ static void DoSaveAs(HWND hwnd)
     std::thread([hwnd, r, pixels = std::move(pixels), w, h, srcPath]() mutable {
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         r->success = SaveImage(r->savedPath, r->format, pixels.data(), w, h, srcPath);
+        CoUninitialize();
+        PostMessage(hwnd, WM_SAVE_DONE, 0, reinterpret_cast<LPARAM>(r));
+    }).detach();
+}
+
+static void DoOpenConvertDialog(HWND hwnd)
+{
+    if (g_edit.pixels.empty() || g_viewState.editIsAnimated) return;
+    if (g_isSaving.load()) return;
+
+    bool hasAlpha = false;
+    for (size_t i = 3; i < g_edit.pixels.size(); i += 4)
+        if (g_edit.pixels[i] < 255) { hasAlpha = true; break; }
+
+    const bool srcIsJpeg = _wcsicmp(g_edit.format.c_str(), L"JPEG") == 0;
+    g_viewState.convertFormat        = srcIsJpeg ? 1 : 0;
+    g_viewState.convertQuality       = kConvertFormats[g_viewState.convertFormat].defaultQuality;
+    g_viewState.convertLossless      = false;
+    g_viewState.convertFlattenBlack  = false;
+    g_viewState.convertHasAlpha      = hasAlpha;
+    g_viewState.convertDlgHoverBtn   = 0;
+    g_viewState.convertDlgPressedBtn = 0;
+    g_viewState.showConvertDialog    = true;
+    g_viewState.dialogAlpha = 0.0f;
+    QueryPerformanceCounter(&g_dialogFadeLastTime);
+    KillTimer(hwnd, kDialogFadeTimerID);
+    SetTimer(hwnd, kDialogFadeTimerID, kAnimIntervalMs, nullptr);
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+static void CloseConvertDialog(HWND hwnd)
+{
+    g_viewState.showConvertDialog    = false;
+    g_viewState.convertDlgHoverBtn   = 0;
+    g_viewState.convertDlgPressedBtn = 0;
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+static void ConvertDlgAdjust(int btnId)
+{
+    constexpr int kStep = 5;
+    if (btnId == 3)      g_viewState.convertQuality = max(1,   g_viewState.convertQuality - kStep);
+    else if (btnId == 4) g_viewState.convertQuality = min(100, g_viewState.convertQuality + kStep);
+}
+
+static bool ExtMatchesConvertFormat(const std::wstring& ext, const ConvertFormatInfo& fi)
+{
+    if (_wcsicmp(ext.c_str(), fi.ext) == 0) return true;
+    const std::wstring f = fi.format;
+    if (f == L"JPEG") return _wcsicmp(ext.c_str(), L"jpeg") == 0;
+    if (f == L"HEIC") return _wcsicmp(ext.c_str(), L"heif") == 0;
+    if (f == L"TIFF") return _wcsicmp(ext.c_str(), L"tif") == 0;
+    return false;
+}
+
+static std::wstring ShowConvertSaveDialog(HWND hwnd, const std::wstring& srcPath,
+                                           const ConvertFormatInfo& fi)
+{
+    const auto slash = srcPath.find_last_of(L"\\/");
+    const std::wstring dir  = (slash != std::wstring::npos) ? srcPath.substr(0, slash) : L"";
+    const std::wstring name = (slash != std::wstring::npos) ? srcPath.substr(slash + 1) : srcPath;
+    const auto dot = name.rfind(L'.');
+    const std::wstring stem = (dot != std::wstring::npos) ? name.substr(0, dot) : name;
+
+    wchar_t buf[MAX_PATH] = {};
+    wcsncpy_s(buf, (stem + L'.' + fi.ext).c_str(), MAX_PATH - 1);
+
+    std::wstring filter = fi.label;
+    filter.push_back(L'\0');
+    filter.append(L"*.").append(fi.ext);
+    filter.push_back(L'\0');
+
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize     = sizeof(ofn);
+    ofn.hwndOwner       = hwnd;
+    ofn.lpstrFile       = buf;
+    ofn.nMaxFile        = MAX_PATH;
+    ofn.lpstrFilter     = filter.c_str();
+    ofn.lpstrInitialDir = dir.empty() ? nullptr : dir.c_str();
+    ofn.lpstrDefExt     = fi.ext;
+    ofn.lpstrTitle      = L"Convert to";
+    ofn.Flags           = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+    if (!GetSaveFileNameW(&ofn)) return L"";
+
+    std::wstring result = buf;
+    const auto rdot = result.rfind(L'.');
+    const auto rsep = result.find_last_of(L"\\/");
+    const bool hasExt = (rdot != std::wstring::npos) && (rsep == std::wstring::npos || rdot > rsep);
+    if (hasExt && ExtMatchesConvertFormat(result.substr(rdot + 1), fi)) return result;
+
+    const std::wstring corrected = (hasExt ? result.substr(0, rdot) : result) + L'.' + fi.ext;
+    if (GetFileAttributesW(corrected.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        const std::wstring msg = corrected.substr(corrected.find_last_of(L"\\/") + 1)
+                               + L" already exists.\nDo you want to overwrite it?";
+        if (MessageBoxW(hwnd, msg.c_str(), L"Confirm Overwrite", MB_YESNO | MB_ICONWARNING) != IDYES)
+            return L"";
+    }
+    return corrected;
+}
+
+static void DoConvertConfirmed(HWND hwnd)
+{
+    if (g_edit.pixels.empty() || g_isSaving.load()) return;
+
+    const ConvertFormatInfo& fi = kConvertFormats[g_viewState.convertFormat];
+    const std::wstring target = ShowConvertSaveDialog(hwnd, g_edit.filePath, fi);
+    if (target.empty()) return;
+
+    SaveOptions opts;
+    opts.quality      = fi.defaultQuality > 0 ? g_viewState.convertQuality : 0;
+    opts.lossless     = g_viewState.convertLossless && wcscmp(fi.format, L"WebP") == 0;
+    opts.flattenBlack = g_viewState.convertFlattenBlack;
+
+    CloseConvertDialog(hwnd);
+    SetWindowTextW(hwnd, L"Converting… — Lumina");
+
+    g_isSaving.store(true);
+    auto* r      = new SaveDoneResult();
+    r->isConvert = true;
+    r->savedPath = target;
+    r->origPath  = g_edit.filePath;
+    r->format    = fi.format;
+
+    auto pixels = g_edit.pixels;
+    UINT w = g_edit.width, h = g_edit.height;
+    std::wstring srcPath = g_edit.filePath;
+    std::thread([hwnd, r, pixels = std::move(pixels), w, h, srcPath, opts]() mutable {
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        r->success = SaveImage(r->savedPath, r->format, pixels.data(), w, h, srcPath, opts);
         CoUninitialize();
         PostMessage(hwnd, WM_SAVE_DONE, 0, reinterpret_cast<LPARAM>(r));
     }).detach();
@@ -2607,6 +2740,16 @@ static bool KeyDown_ResizeDlg(HWND hwnd, WPARAM wParam)
     return true;
 }
 
+static bool KeyDown_ConvertDlg(HWND hwnd, WPARAM wParam)
+{
+    if (!g_viewState.showConvertDialog) return false;
+    if (wParam == VK_ESCAPE)
+        CloseConvertDialog(hwnd);
+    else if (wParam == VK_RETURN)
+        DoConvertConfirmed(hwnd);
+    return true;
+}
+
 static bool KeyDown_DeleteDlg(HWND hwnd, WPARAM wParam)
 {
     if (!g_viewState.showDeleteConfirmDialog && !g_viewState.showUnsavedWarningDialog)
@@ -2640,6 +2783,7 @@ static LRESULT On_WM_KEYDOWN(HWND hwnd, WPARAM wParam)
     if (KeyDown_CropDialog(hwnd, wParam))    return 0;
     if (KeyDown_RotateFreeDlg(hwnd, wParam)) return 0;
     if (KeyDown_ResizeDlg(hwnd, wParam))     return 0;
+    if (KeyDown_ConvertDlg(hwnd, wParam))    return 0;
     if (KeyDown_DeleteDlg(hwnd, wParam))     return 0;
 
     switch (wParam)
@@ -2833,6 +2977,32 @@ static bool LBDown_ResizeDlg(HWND hwnd, float mx, float my)
     return true;
 }
 
+static int HitTestConvertDlg(float mx, float my)
+{
+    if (!g_renderer || !g_renderer->IsConvertDialogVisible()) return 0;
+    auto inR = [](float x, float y, const D2D1_RECT_F& r) {
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    };
+    if (inR(mx, my, g_renderer->GetConvertDlgCancelRect()))   return 1;
+    if (inR(mx, my, g_renderer->GetConvertDlgApplyRect()))    return 2;
+    if (inR(mx, my, g_renderer->GetConvertDlgDecRect()))      return 3;
+    if (inR(mx, my, g_renderer->GetConvertDlgIncRect()))      return 4;
+    if (inR(mx, my, g_renderer->GetConvertDlgLosslessRect())) return 5;
+    if (inR(mx, my, g_renderer->GetConvertDlgBgRect()))       return 6;
+    for (int i = 0; i < kConvertFormatCount; ++i)
+        if (inR(mx, my, g_renderer->GetConvertDlgFormatRect(i))) return 10 + i;
+    return 0;
+}
+
+static bool LBDown_ConvertDlg(HWND hwnd, float mx, float my)
+{
+    if (!g_viewState.showConvertDialog) return false;
+    g_viewState.convertDlgPressedBtn = HitTestConvertDlg(mx, my);
+    SetCapture(hwnd);
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return true;
+}
+
 static bool LBDown_DeleteDlg(HWND hwnd, float mx, float my)
 {
     if (!g_viewState.showDeleteConfirmDialog && !g_viewState.showUnsavedWarningDialog)
@@ -2892,13 +3062,15 @@ static void LBDown_MainArea(HWND hwnd, float mx, float my)
         D2D1_RECT_F rFr   = g_renderer->GetEditBtnRotFreeRect();
         D2D1_RECT_F rRz   = g_renderer->GetEditBtnResizeRect();
         D2D1_RECT_F rCr   = g_renderer->GetEditBtnCropRect();
+        D2D1_RECT_F rCv   = g_renderer->GetEditBtnConvertRect();
         bool hitL    = inR2(mx, my, rL);
         bool hitR    = inR2(mx, my, rR);
         bool hitMore = inR2(mx, my, rMore);
         bool hitFr   = inR2(mx, my, rFr);
         bool hitRz   = inR2(mx, my, rRz);
         bool hitCr   = inR2(mx, my, rCr);
-        if (hitL || hitR || hitMore || hitFr || hitRz || hitCr)
+        bool hitCv   = inR2(mx, my, rCv);
+        if (hitL || hitR || hitMore || hitFr || hitRz || hitCr || hitCv)
         {
             g_clickInToolbar = true;
             g_viewState.editBtnRotLPressed    = hitL;
@@ -2907,6 +3079,7 @@ static void LBDown_MainArea(HWND hwnd, float mx, float my)
             g_viewState.editBtnRotFreePressed = hitFr;
             g_viewState.editBtnResizePressed  = hitRz;
             g_viewState.editBtnCropPressed    = hitCr;
+            g_viewState.editBtnConvertPressed = hitCv;
             InvalidateRect(hwnd, nullptr, FALSE);
             return;
         }
@@ -2999,6 +3172,7 @@ static LRESULT On_WM_LBUTTONDOWN(HWND hwnd, LPARAM lParam)
     if (LBDown_CropDialog(hwnd, mx, my))    return 0;
     if (LBDown_RotateFreeDlg(hwnd, mx, my)) return 0;
     if (LBDown_ResizeDlg(hwnd, mx, my))     return 0;
+    if (LBDown_ConvertDlg(hwnd, mx, my))    return 0;
     if (LBDown_DeleteDlg(hwnd, mx, my))     return 0;
     LBDown_MainArea(hwnd, mx, my);
     return 0;
@@ -3154,6 +3328,18 @@ static bool MouseMove_ResizeDlg(HWND hwnd, float mx, float my)
     return true;
 }
 
+static bool MouseMove_ConvertDlg(HWND hwnd, float mx, float my)
+{
+    if (!g_viewState.showConvertDialog) return false;
+    const int newHover = HitTestConvertDlg(mx, my);
+    if (newHover != g_viewState.convertDlgHoverBtn)
+    {
+        g_viewState.convertDlgHoverBtn = newHover;
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    return true;
+}
+
 static bool MouseMove_DeleteDlg(HWND hwnd, float mx, float my)
 {
     if (!g_viewState.showDeleteConfirmDialog && !g_viewState.showUnsavedWarningDialog)
@@ -3202,13 +3388,15 @@ static void MouseMove_Idle(HWND hwnd, float mx, float my)
     }
 
     if (g_renderer && g_renderer->IsEditToolbarVisible()
-        && !g_viewState.showCropDialog && !g_viewState.showResizeDialog && !g_viewState.showRotateFreeDialog)
+        && !g_viewState.showCropDialog && !g_viewState.showResizeDialog && !g_viewState.showRotateFreeDialog
+        && !g_viewState.showConvertDialog)
     {
         auto inR = [](float x, float y, const D2D1_RECT_F& r) {
             return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
         };
         int newHov = 0;
-        if      (inR(mx, my, g_renderer->GetEditBtnRotLRect()))    newHov = 1;
+        if      (inR(mx, my, g_renderer->GetEditBtnConvertRect())) newHov = 7;
+        else if (inR(mx, my, g_renderer->GetEditBtnRotLRect()))    newHov = 1;
         else if (inR(mx, my, g_renderer->GetEditBtnRotRRect()))    newHov = 2;
         else if (inR(mx, my, g_renderer->GetEditBtnMoreRect()))    newHov = 3;
         else if (inR(mx, my, g_renderer->GetEditBtnRotFreeRect())) newHov = 4;
@@ -3327,6 +3515,7 @@ static LRESULT On_WM_MOUSEMOVE(HWND hwnd, LPARAM lParam)
     if (MouseMove_CropDialog(hwnd, mx, my))    return 0;
     if (MouseMove_RotateFreeDlg(hwnd, mx, my)) return 0;
     if (MouseMove_ResizeDlg(hwnd, mx, my))     return 0;
+    if (MouseMove_ConvertDlg(hwnd, mx, my))    return 0;
     if (MouseMove_DeleteDlg(hwnd, mx, my))     return 0;
     MouseMove_Idle(hwnd, mx, my);
     return 0;
@@ -3512,6 +3701,42 @@ static LRESULT LBUp_ResizeDlg(HWND hwnd, float mx, float my)
     return 0;
 }
 
+static LRESULT LBUp_ConvertDlg(HWND hwnd, float mx, float my)
+{
+    if (!g_viewState.showConvertDialog) return -1;
+    const int pressed = g_viewState.convertDlgPressedBtn;
+    g_viewState.convertDlgPressedBtn = 0;
+    ReleaseCapture();
+    if (pressed != 0 && HitTestConvertDlg(mx, my) == pressed)
+    {
+        if (pressed == 1)
+        {
+            CloseConvertDialog(hwnd);
+            return 0;
+        }
+        if (pressed == 2)
+        {
+            DoConvertConfirmed(hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (pressed == 3 || pressed == 4)      ConvertDlgAdjust(pressed);
+        else if (pressed == 5)                 g_viewState.convertLossless     = !g_viewState.convertLossless;
+        else if (pressed == 6)                 g_viewState.convertFlattenBlack = !g_viewState.convertFlattenBlack;
+        else if (pressed >= 10 && pressed < 10 + kConvertFormatCount)
+        {
+            const int idx = pressed - 10;
+            if (idx != g_viewState.convertFormat)
+            {
+                g_viewState.convertFormat  = idx;
+                g_viewState.convertQuality = kConvertFormats[idx].defaultQuality;
+            }
+        }
+    }
+    InvalidateRect(hwnd, nullptr, FALSE);
+    return 0;
+}
+
 static LRESULT LBUp_DeleteDlg(HWND hwnd, float mx, float my)
 {
     if (!g_viewState.showDeleteConfirmDialog && !g_viewState.showUnsavedWarningDialog)
@@ -3566,6 +3791,8 @@ static LRESULT LBUp_EditToolbar(HWND hwnd, float mx, float my)
     bool wasFr   = g_viewState.editBtnRotFreePressed;
     bool wasRz   = g_viewState.editBtnResizePressed;
     bool wasCr   = g_viewState.editBtnCropPressed;
+    bool wasCv   = g_viewState.editBtnConvertPressed;
+    g_viewState.editBtnConvertPressed = false;
     g_viewState.editBtnRotLPressed    = false;
     g_viewState.editBtnRotRPressed    = false;
     g_viewState.editBtnMorePressed    = false;
@@ -3589,6 +3816,7 @@ static LRESULT LBUp_EditToolbar(HWND hwnd, float mx, float my)
         else if (wasFr)  DoOpenRotateFreeDialog(hwnd);
         else if (wasRz)  DoOpenResizeDialog(hwnd);
         else if (wasCr)  DoOpenCropDialog(hwnd);
+        else if (wasCv)  DoOpenConvertDialog(hwnd);
     }
     else
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -3837,6 +4065,7 @@ static LRESULT On_WM_LBUTTONUP(HWND hwnd, LPARAM lParam)
     if ((r = LBUp_CropDialog(hwnd, mx, my))    != -1) return r;
     if ((r = LBUp_RotateFreeDlg(hwnd, mx, my)) != -1) return r;
     if ((r = LBUp_ResizeDlg(hwnd, mx, my))     != -1) return r;
+    if ((r = LBUp_ConvertDlg(hwnd, mx, my))    != -1) return r;
     if ((r = LBUp_DeleteDlg(hwnd, mx, my))     != -1) return r;
 
     bool wasDragging = g_dragging;
@@ -4000,7 +4229,7 @@ static LRESULT On_WM_LBUTTONDBLCLK(HWND hwnd, WPARAM wParam, LPARAM lParam)
 
     if (g_viewState.showResizeDialog || g_viewState.showRotateFreeDialog ||
         g_viewState.showCropDialog   || g_viewState.showDeleteConfirmDialog ||
-        g_viewState.showUnsavedWarningDialog)
+        g_viewState.showUnsavedWarningDialog || g_viewState.showConvertDialog)
         return SendMessage(hwnd, WM_LBUTTONDOWN, wParam, lParam);
 
     if (g_renderer && g_renderer->IsEditToolbarVisible() && !g_viewState.editIsAnimated)
@@ -4011,6 +4240,7 @@ static LRESULT On_WM_LBUTTONDBLCLK(HWND hwnd, WPARAM wParam, LPARAM lParam)
         D2D1_RECT_F rFr   = g_renderer->GetEditBtnRotFreeRect();
         D2D1_RECT_F rRz   = g_renderer->GetEditBtnResizeRect();
         D2D1_RECT_F rCr   = g_renderer->GetEditBtnCropRect();
+        D2D1_RECT_F rCv   = g_renderer->GetEditBtnConvertRect();
         if ((cx >= rL.left && cx <= rL.right && cy >= rL.top && cy <= rL.bottom) ||
             (cx >= rR.left && cx <= rR.right && cy >= rR.top && cy <= rR.bottom))
         {
@@ -4020,7 +4250,8 @@ static LRESULT On_WM_LBUTTONDBLCLK(HWND hwnd, WPARAM wParam, LPARAM lParam)
                 DoRotateCW(hwnd);
             return 0;
         }
-        if ((cx >= rMore.left && cx <= rMore.right && cy >= rMore.top && cy <= rMore.bottom) ||
+        if ((cx >= rCv.left   && cx <= rCv.right   && cy >= rCv.top   && cy <= rCv.bottom)   ||
+            (cx >= rMore.left && cx <= rMore.right && cy >= rMore.top && cy <= rMore.bottom) ||
             (cx >= rFr.left   && cx <= rFr.right   && cy >= rFr.top   && cy <= rFr.bottom)   ||
             (cx >= rRz.left   && cx <= rRz.right   && cy >= rRz.top   && cy <= rRz.bottom)   ||
             (cx >= rCr.left   && cx <= rCr.right   && cy >= rCr.top   && cy <= rCr.bottom))
@@ -4082,6 +4313,36 @@ static LRESULT On_WM_SAVE_DONE(HWND hwnd, LPARAM lParam)
 {
     auto* r = reinterpret_cast<SaveDoneResult*>(lParam);
     g_isSaving.store(false);
+    if (r->isConvert)
+    {
+        UpdateWindowTitle(hwnd, g_edit.filePath);
+        if (r->success)
+        {
+            {
+                std::lock_guard<std::mutex> lk(g_metaCacheMutex);
+                g_metaCache.erase(r->savedPath);
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_cacheMutex);
+                g_decodeCache.erase(r->savedPath);
+            }
+            SetTimer(hwnd, kDirChangeTimerID, 200, nullptr);
+        }
+        else
+        {
+            g_viewState.noticeKind = 1;
+            g_viewState.showUnsavedWarningDialog = true;
+            g_viewState.deleteDlgHoverBtn   = 0;
+            g_viewState.deleteDlgPressedBtn = 0;
+            g_viewState.dialogAlpha = 0.0f;
+            QueryPerformanceCounter(&g_dialogFadeLastTime);
+            KillTimer(hwnd, kDialogFadeTimerID);
+            SetTimer(hwnd, kDialogFadeTimerID, kAnimIntervalMs, nullptr);
+        }
+        delete r;
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
     if (r->success)
     {
         if (r->isSaveAs) {

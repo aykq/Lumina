@@ -26,6 +26,7 @@ Lumina, C++23, Win32 ve Direct2D ile yazılmış yerli bir Windows fotoğraf gö
 - **Prefetch cache** — anında klasör gezintisi için ±8 fotoğraf önbelleği
 - **Filmstrip çubuğu** — altta kaydırılabilir küçük resim şeridi (**F** tuşu ile aç/kapat)
 - **Fotoğraf düzenleme** — 90° döndürme, serbest açı ufuk düzeltme, kırpma (serbest + 1:1 / 4:3 / 16:9 / …), yeniden boyutlandırma
+- **Format dönüştürme** — araç çubuğundaki ⇄ butonu bir kopyayı JPEG, PNG, WebP, HEIC, BMP, TIFF, JPEG XL veya AVIF olarak, formata özel kalite ayarıyla kaydeder; EXIF ve GPS bilgileri taşınır, orijinal dosya değişmez
 - **Explorer küçük resimleri** — `LuminaShell.dll`, HEIC, JXL, AVIF ve WebP için Explorer önizlemesi ekler
 - **Çoklu örnek** — Explorer'dan her çift tıklama bağımsız bir pencere açar
 

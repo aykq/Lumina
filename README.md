@@ -26,6 +26,7 @@ Lumina is a native Windows photo viewer built with C++23, Win32, and Direct2D. I
 - **Prefetch cache** — ±8-photo lookahead for instant folder navigation
 - **Filmstrip bar** — scrollable thumbnail strip at the bottom (toggle with **F**)
 - **Photo editing** — 90° rotation, free-angle horizon correction, crop (free + fixed ratio 1:1 / 4:3 / 16:9 / …), resize
+- **Format conversion** — the ⇄ toolbar button saves a copy as JPEG, PNG, WebP, HEIC, BMP, TIFF, JPEG XL, or AVIF with per-format quality settings; EXIF and GPS data are carried over and the original stays untouched
 - **Explorer thumbnails** — `LuminaShell.dll` adds thumbnail support for HEIC, JXL, AVIF, and WebP
 - **Multi-instance** — every Explorer double-click opens an independent, isolated window
 

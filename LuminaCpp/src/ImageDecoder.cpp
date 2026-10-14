@@ -2111,6 +2111,122 @@ static std::vector<uint8_t> BrotliInflate(const uint8_t* in, size_t inSize)
     return out;
 }
 
+// A TIFF file's IFD0 describes its own strips, so only metadata tags are copied into a fresh EXIF block
+static std::vector<uint8_t> ExifFromTiffFile(const uint8_t* t, size_t sz)
+{
+    if (sz < 8) return {};
+    const bool le = (t[0] == 'I');
+    auto rd16 = [&](size_t o) -> uint16_t {
+        if (o + 2 > sz) return 0;
+        return le ? uint16_t(t[o] | (t[o + 1] << 8)) : uint16_t((t[o] << 8) | t[o + 1]);
+    };
+    auto rd32 = [&](size_t o) -> uint32_t {
+        if (o + 4 > sz) return 0;
+        return le ? (uint32_t(t[o]) | uint32_t(t[o + 1]) << 8 | uint32_t(t[o + 2]) << 16 | uint32_t(t[o + 3]) << 24)
+                  : (uint32_t(t[o]) << 24 | uint32_t(t[o + 1]) << 16 | uint32_t(t[o + 2]) << 8 | uint32_t(t[o + 3]));
+    };
+    if (rd16(2) != 42) return {};
+
+    struct Ent { uint16_t tag, type; uint32_t cnt; std::vector<uint8_t> raw; };
+    static const size_t kUnit[] = { 0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8 };
+    size_t budget = 64 * 1024;
+    auto readIfd = [&](size_t ifd, auto keep) {
+        std::vector<Ent> out;
+        if (ifd < 8 || ifd + 2 > sz) return out;
+        const uint16_t count = std::min<uint16_t>(rd16(ifd), 512);
+        for (uint16_t i = 0; i < count; ++i)
+        {
+            const size_t e = ifd + 2 + static_cast<size_t>(i) * 12;
+            if (e + 12 > sz) break;
+            const uint16_t tag = rd16(e), type = rd16(e + 2);
+            const uint32_t cnt = rd32(e + 4);
+            if (!keep(tag) || type < 1 || type > 10 || cnt == 0 || cnt > 4096) continue;
+            const size_t total = kUnit[type] * cnt;
+            const size_t at = total > 4 ? rd32(e + 8) : e + 8;
+            if (total > 4096 || total > budget || at + total > sz) continue;
+            budget -= total;
+            out.push_back({ tag, type, cnt, std::vector<uint8_t>(t + at, t + at + total) });
+        }
+        return out;
+    };
+    auto findPtr = [&](size_t ifd, uint16_t want) -> uint32_t {
+        if (ifd + 2 > sz) return 0;
+        const uint16_t count = std::min<uint16_t>(rd16(ifd), 512);
+        for (uint16_t i = 0; i < count; ++i)
+        {
+            const size_t e = ifd + 2 + static_cast<size_t>(i) * 12;
+            if (e + 12 > sz) break;
+            if (rd16(e) == want) return rd32(e + 8);
+        }
+        return 0;
+    };
+
+    const uint32_t ifd0 = rd32(4);
+    auto base = readIfd(ifd0, [](uint16_t g) {
+        return g == 0x010E || g == 0x010F || g == 0x0110 || g == 0x0112 || g == 0x0131 ||
+               g == 0x0132 || g == 0x013B || g == 0x8298;
+    });
+    auto exif = readIfd(findPtr(ifd0, 0x8769), [](uint16_t g) { return g != 0x927C && g != 0xA005 && g != 0x8769; });
+    auto gps  = readIfd(findPtr(ifd0, 0x8825), [](uint16_t) { return true; });
+    if (base.empty() && exif.empty() && gps.empty()) return {};
+    if (!exif.empty()) base.push_back({ 0x8769, 4, 1, std::vector<uint8_t>(4, 0) });
+    if (!gps.empty())  base.push_back({ 0x8825, 4, 1, std::vector<uint8_t>(4, 0) });
+
+    std::vector<uint8_t> o(8, 0);
+    auto put16 = [&](size_t at, uint16_t v) {
+        o[at] = uint8_t(le ? v : v >> 8);
+        o[at + 1] = uint8_t(le ? v >> 8 : v);
+    };
+    auto put32 = [&](size_t at, uint32_t v) {
+        for (int k = 0; k < 4; ++k) o[at + k] = uint8_t(le ? v >> (8 * k) : v >> (24 - 8 * k));
+    };
+    o[0] = o[1] = le ? 'I' : 'M';
+    put16(2, 42);
+    put32(4, 8);
+
+    auto writeIfd = [&](std::vector<Ent>& ents) {
+        std::sort(ents.begin(), ents.end(), [](const Ent& a, const Ent& b) { return a.tag < b.tag; });
+        size_t exifSlot = 0, gpsSlot = 0;
+        if (o.size() & 1) o.push_back(0);
+        const size_t start = o.size();
+        o.resize(start + 2 + ents.size() * 12 + 4, 0);
+        put16(start, static_cast<uint16_t>(ents.size()));
+        for (size_t i = 0; i < ents.size(); ++i)
+        {
+            const size_t e = start + 2 + i * 12;
+            put16(e, ents[i].tag);
+            put16(e + 2, ents[i].type);
+            put32(e + 4, ents[i].cnt);
+            if (ents[i].tag == 0x8769) exifSlot = e + 8;
+            if (ents[i].tag == 0x8825) gpsSlot = e + 8;
+            if (ents[i].raw.size() <= 4)
+                memcpy(&o[e + 8], ents[i].raw.data(), ents[i].raw.size());
+            else
+            {
+                if (o.size() & 1) o.push_back(0);
+                put32(e + 8, static_cast<uint32_t>(o.size()));
+                o.insert(o.end(), ents[i].raw.begin(), ents[i].raw.end());
+            }
+        }
+        return std::pair<size_t, size_t>(exifSlot, gpsSlot);
+    };
+
+    const auto [exifSlot, gpsSlot] = writeIfd(base);
+    if (exifSlot)
+    {
+        if (o.size() & 1) o.push_back(0);
+        put32(exifSlot, static_cast<uint32_t>(o.size()));
+        writeIfd(exif);
+    }
+    if (gpsSlot)
+    {
+        if (o.size() & 1) o.push_back(0);
+        put32(gpsSlot, static_cast<uint32_t>(o.size()));
+        writeIfd(gps);
+    }
+    return o;
+}
+
 // Orientation is reset to 1 because the saved pixels are already upright.
 static std::vector<uint8_t> ExtractExifTiff(const std::wstring& srcPath)
 {
@@ -2133,6 +2249,10 @@ static std::vector<uint8_t> ExtractExifTiff(const std::wstring& srcPath)
             { out = NormalizeExifTiff(&b[p + 4], len - 2); break; }
             p += 2 + len;
         }
+    }
+    else if (n > 8 && (memcmp(b.data(), "II\x2a\0", 4) == 0 || memcmp(b.data(), "MM\0\x2a", 4) == 0))
+    {
+        out = ExifFromTiffFile(b.data(), n);
     }
     else if (n > 8 && memcmp(b.data(), "\x89PNG\r\n\x1a\n", 8) == 0)
     {
@@ -2928,7 +3048,18 @@ bool SaveImage(const std::wstring& path, const std::wstring& format,
 
     if (format == L"JPEG")
     {
-        if (!SaveImageWIC(path, GUID_ContainerFormatJpeg, px, width, height, sourcePath, opts.quality)) return false;
+        // WIC turns a TIFF source's blocks into an orientation-only APP1, which would block the EXIF insert below
+        bool srcTiff = false;
+        HANDLE hs = CreateFileW(sourcePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hs != INVALID_HANDLE_VALUE)
+        {
+            uint8_t sig[4] = {};
+            DWORD got = 0;
+            srcTiff = ReadFile(hs, sig, 4, &got, nullptr) && got == 4 &&
+                      (memcmp(sig, "II\x2a\0", 4) == 0 || memcmp(sig, "MM\0\x2a", 4) == 0);
+            CloseHandle(hs);
+        }
+        if (!SaveImageWIC(path, GUID_ContainerFormatJpeg, px, width, height, srcTiff ? L"" : sourcePath, opts.quality)) return false;
         if (!exif.empty())
         {
             auto bytes = ReadFileBytes(path);

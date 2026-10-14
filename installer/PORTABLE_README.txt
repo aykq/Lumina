@@ -1,4 +1,4 @@
-Lumina — Portable Version
+Lumina Portable Version
 =========================
 
 This archive contains the portable version of Lumina.
@@ -7,13 +7,13 @@ registered manually for Explorer thumbnails to work.
 
 Files
 -----
-  LuminaCpp.exe     — Main application
-  LuminaShell.dll   — Shell thumbnail handler (HEIC/HEIF, JXL, AVIF, WebP)
+  LuminaCpp.exe     Main application
+  LuminaShell.dll   Shell thumbnail handler (HEIC/HEIF, JXL, AVIF, WebP)
 
 Quick Start
 -----------
 1. Extract both files to any folder (e.g. C:\Tools\Lumina\)
-2. Run LuminaCpp.exe directly — no installation needed
+2. Run LuminaCpp.exe directly, no installation needed
 
 Enabling Explorer Thumbnails (optional)
 -----------------------------------------

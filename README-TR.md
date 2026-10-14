@@ -18,28 +18,28 @@ Lumina, C++23, Win32 ve Direct2D ile yazılmış yerli bir Windows fotoğraf gö
 
 ## Özellikler
 
-- **Anlık açılış** — <10 ms başlangıç, splash screen yok, runtime yükü yok
-- **GPU render** — Direct2D sıfır-kopya görüntüleme; zoom ve pan CPU'ya dokunmaz
-- **Geniş format desteği** — aşağıdaki tabloya bakın; animasyonlu WebP, JXL, AVIF ve GIF dahil
-- **EXIF metadata paneli** — kamera modeli, lens, enstantane hızı, diyafram, ISO, GPS koordinatları
-- **OpenStreetMap önizlemesi** — konum etiketli fotoğraflarda satır içi harita; Google Maps bağlantısı
-- **Prefetch cache** — anında klasör gezintisi için ±8 fotoğraf önbelleği
-- **Filmstrip çubuğu** — altta kaydırılabilir küçük resim şeridi (**F** tuşu ile aç/kapat)
-- **Fotoğraf düzenleme** — 90° döndürme, serbest açı ufuk düzeltme, kırpma (serbest + 1:1 / 4:3 / 16:9 / …), yeniden boyutlandırma
-- **Format dönüştürme** — araç çubuğundaki ⇄ butonu bir kopyayı JPEG, PNG, WebP, HEIC, BMP, TIFF, JPEG XL veya AVIF olarak, formata özel kalite ayarıyla kaydeder; EXIF ve GPS bilgileri taşınır, orijinal dosya değişmez
-- **Explorer küçük resimleri** — `LuminaShell.dll`, HEIC, JXL, AVIF ve WebP için Explorer önizlemesi ekler
-- **Çoklu örnek** — Explorer'dan her çift tıklama bağımsız bir pencere açar
+- **Anlık açılış**: <10 ms başlangıç, splash screen yok, runtime yükü yok
+- **GPU render**: Direct2D sıfır-kopya görüntüleme; zoom ve pan CPU'ya dokunmaz
+- **Geniş format desteği**: aşağıdaki tabloya bakın; animasyonlu WebP, JXL, AVIF ve GIF dahil
+- **EXIF metadata paneli**: kamera modeli, lens, enstantane hızı, diyafram, ISO, GPS koordinatları
+- **OpenStreetMap önizlemesi**: konum etiketli fotoğraflarda satır içi harita; Google Maps bağlantısı
+- **Prefetch cache**: anında klasör gezintisi için ±8 fotoğraf önbelleği
+- **Filmstrip çubuğu**: altta kaydırılabilir küçük resim şeridi (**F** tuşu ile aç/kapat)
+- **Fotoğraf düzenleme**: 90° döndürme, serbest açı ufuk düzeltme, kırpma (serbest + 1:1 / 4:3 / 16:9 / …), yeniden boyutlandırma
+- **Format dönüştürme**: araç çubuğundaki ⇄ butonu bir kopyayı JPEG, PNG, WebP, HEIC, BMP, TIFF, JPEG XL veya AVIF olarak, formata özel kalite ayarıyla kaydeder; EXIF ve GPS bilgileri taşınır, orijinal dosya değişmez
+- **Explorer küçük resimleri**: `LuminaShell.dll`, HEIC, JXL, AVIF ve WebP için Explorer önizlemesi ekler
+- **Çoklu örnek**: Explorer'dan her çift tıklama bağımsız bir pencere açar
 
 ## Desteklenen Formatlar
 
 | Format | Uzantı | Animasyon | EXIF / GPS |
 |--------|--------|:---------:|:----------:|
-| JPEG | `.jpg` `.jpeg` | — | ✅ |
-| PNG | `.png` | — | ✅ |
-| BMP | `.bmp` | — | — |
-| GIF | `.gif` | ✅ | — |
-| TIFF | `.tif` `.tiff` | — | ✅ |
-| ICO | `.ico` | — | — |
+| JPEG | `.jpg` `.jpeg` | ❌ | ✅ |
+| PNG | `.png` | ❌ | ✅ |
+| BMP | `.bmp` | ❌ | ❌ |
+| GIF | `.gif` | ✅ | ❌ |
+| TIFF | `.tif` `.tiff` | ❌ | ✅ |
+| ICO | `.ico` | ❌ | ❌ |
 | WebP | `.webp` | ✅ | ✅ |
 | HEIC / HEIF | `.heic` `.heif` | ✅ | ✅ |
 | JPEG XL | `.jxl` | ✅ | ✅ |
@@ -58,7 +58,7 @@ Son sürümü **[GitHub Releases](https://github.com/aykq/Lumina/releases/latest
 
 | Paket | Açıklama |
 |-------|----------|
-| `Lumina-*-x64-Setup.exe` | Önerilen — rehberli kurulum (Inno Setup) |
+| `Lumina-*-x64-Setup.exe` | Önerilen: rehberli kurulum (Inno Setup) |
 | `Lumina-*-x64.msi` | Kurumsal / Grup İlkesi dağıtımı için MSI |
 | `Lumina-*-x64-Portable.zip` | Kurulum gerektirmez; `LuminaCpp.exe`'yi doğrudan çalıştırın |
 
@@ -71,10 +71,6 @@ Yükleyici Authenticode ile imzalanmamıştır. İlk çalıştırmada Windows De
 1. **Daha fazla bilgi → Yine de çalıştır**'a tıklayın
 2. Dosya bütünlüğünü doğrulayın: `certutil -hashfile Lumina-*-Setup.exe SHA256` çıktısını `SHA256SUMS.txt` ile karşılaştırın
 3. SLSA kanıtlaması: `gh attestation verify <artifact> --repo aykq/Lumina`
-
-
-
-Kaydı silmek için: `regsvr32 /u "C:\LuminaShell.dll konumu\LuminaShell.dll"`
 
 ## Klavye Kısayolları
 
@@ -96,7 +92,7 @@ Kaydı silmek için: `regsvr32 /u "C:\LuminaShell.dll konumu\LuminaShell.dll"`
 
 **Gereksinimler**
 
-- [Visual Studio 2022](https://visualstudio.microsoft.com/) — **C++ ile masaüstü geliştirme** iş yükü
+- [Visual Studio 2022](https://visualstudio.microsoft.com/) ve **C++ ile masaüstü geliştirme** iş yükü
 - Windows 10 SDK ≥ 10.0.19041
 - [vcpkg](https://github.com/microsoft/vcpkg) (güncel herhangi bir sürüm; bağımlılıklar `vcpkg.json` içinde tanımlıdır)
 
@@ -108,7 +104,7 @@ cd Lumina
 # vcpkg'yi MSBuild ile entegre edin (makine başına bir kez)
 vcpkg integrate install
 
-# Derleme — vcpkg.json ilk derlemede tüm bağımlılıkları otomatik indirir
+# Derleme: vcpkg.json ilk derlemede tüm bağımlılıkları otomatik indirir
 msbuild LuminaCpp\LuminaCpp.vcxproj /p:Configuration=Release /p:Platform=x64 /m
 msbuild LuminaShell\LuminaShell.vcxproj /p:Configuration=Release /p:Platform=x64 /m
 ```
@@ -120,6 +116,8 @@ msbuild LuminaShell\LuminaShell.vcxproj /p:Configuration=Release /p:Platform=x64
 ```powershell
 # Yönetici olarak çalıştırın
 regsvr32 "x64\Release\LuminaShell.dll"
+# Kaydı silmek için
+regsvr32 /u "x64\Release\LuminaShell.dll"
 ```
 
 **HEIC decode notu:** Lumina önce işletim sistemi codec'ini (HEIF Image Extensions, GPU hızlandırmalı, çoğu Windows 11 22H2+ sistemine kurulu gelir) dener. Yoksa otomatik olarak dahili libheif decoder'a geçer.
@@ -134,6 +132,6 @@ Harita karoları ve verisi © [OpenStreetMap katkıcıları](https://www.openstr
 
 ## Lisans
 
-MIT © 2025 AykQ — bkz. [LICENSE](LICENSE).
+MIT © 2025 AykQ. Ayrıntılar: [LICENSE](LICENSE).
 
 Üçüncü taraf kütüphaneler ve lisansları [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) dosyasında listelenmiştir.

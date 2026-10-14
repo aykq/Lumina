@@ -14,32 +14,32 @@
 
 ---
 
-Lumina is a native Windows photo viewer built with C++23, Win32, and Direct2D. It opens in under 10 ms, renders via the GPU, and supports every major image format—including HEIC, JPEG XL, and AVIF—without requiring extra system codecs.
+Lumina is a native Windows photo viewer built with C++23, Win32, and Direct2D. It opens in under 10 ms, renders via the GPU, and supports every major image format, including HEIC, JPEG XL, and AVIF, without requiring extra system codecs.
 
 ## Features
 
-- **Instant startup** — <10 ms launch, no splash screen, no runtime overhead
-- **GPU rendering** — Direct2D zero-copy display; zoom and pan never touch the CPU
-- **Wide format support** — see table below, including animated WebP, JXL, AVIF, and GIF
-- **EXIF metadata panel** — camera model, lens, shutter speed, aperture, ISO, GPS coordinates
-- **OpenStreetMap preview** — inline map tile rendering for geotagged photos, click to open Google Maps
-- **Prefetch cache** — ±8-photo lookahead for instant folder navigation
-- **Filmstrip bar** — scrollable thumbnail strip at the bottom (toggle with **F**)
-- **Photo editing** — 90° rotation, free-angle horizon correction, crop (free + fixed ratio 1:1 / 4:3 / 16:9 / …), resize
-- **Format conversion** — the ⇄ toolbar button saves a copy as JPEG, PNG, WebP, HEIC, BMP, TIFF, JPEG XL, or AVIF with per-format quality settings; EXIF and GPS data are carried over and the original stays untouched
-- **Explorer thumbnails** — `LuminaShell.dll` adds thumbnail support for HEIC, JXL, AVIF, and WebP
-- **Multi-instance** — every Explorer double-click opens an independent, isolated window
+- **Instant startup**: <10 ms launch, no splash screen, no runtime overhead
+- **GPU rendering**: Direct2D zero-copy display; zoom and pan never touch the CPU
+- **Wide format support**: see table below, including animated WebP, JXL, AVIF, and GIF
+- **EXIF metadata panel**: camera model, lens, shutter speed, aperture, ISO, GPS coordinates
+- **OpenStreetMap preview**: inline map tile rendering for geotagged photos, click to open Google Maps
+- **Prefetch cache**: ±8-photo lookahead for instant folder navigation
+- **Filmstrip bar**: scrollable thumbnail strip at the bottom (toggle with **F**)
+- **Photo editing**: 90° rotation, free-angle horizon correction, crop (free + fixed ratio 1:1 / 4:3 / 16:9 / …), resize
+- **Format conversion**: the ⇄ toolbar button saves a copy as JPEG, PNG, WebP, HEIC, BMP, TIFF, JPEG XL, or AVIF with per-format quality settings; EXIF and GPS data are carried over and the original stays untouched
+- **Explorer thumbnails**: `LuminaShell.dll` adds thumbnail support for HEIC, JXL, AVIF, and WebP
+- **Multi-instance**: every Explorer double-click opens an independent, isolated window
 
 ## Supported Formats
 
 | Format | Extension(s) | Animated | EXIF / GPS |
 |--------|-------------|:--------:|:----------:|
-| JPEG | `.jpg` `.jpeg` | — | ✅ |
-| PNG | `.png` | — | ✅ |
-| BMP | `.bmp` | — | — |
-| GIF | `.gif` | ✅ | — |
-| TIFF | `.tif` `.tiff` | — | ✅ |
-| ICO | `.ico` | — | — |
+| JPEG | `.jpg` `.jpeg` | ❌ | ✅ |
+| PNG | `.png` | ❌ | ✅ |
+| BMP | `.bmp` | ❌ | ❌ |
+| GIF | `.gif` | ✅ | ❌ |
+| TIFF | `.tif` `.tiff` | ❌ | ✅ |
+| ICO | `.ico` | ❌ | ❌ |
 | WebP | `.webp` | ✅ | ✅ |
 | HEIC / HEIF | `.heic` `.heif` | ✅ | ✅ |
 | JPEG XL | `.jxl` | ✅ | ✅ |
@@ -58,7 +58,7 @@ Download the latest release from **[GitHub Releases](https://github.com/aykq/Lum
 
 | Package | Description |
 |---------|-------------|
-| `Lumina-*-x64-Setup.exe` | Recommended — guided installer (Inno Setup) |
+| `Lumina-*-x64-Setup.exe` | Recommended: guided installer (Inno Setup) |
 | `Lumina-*-x64.msi` | MSI for enterprise / Group Policy deployment |
 | `Lumina-*-x64-Portable.zip` | No install required; run `LuminaCpp.exe` directly |
 
@@ -104,7 +104,7 @@ cd Lumina
 # Integrate vcpkg with MSBuild (once per machine)
 vcpkg integrate install
 
-# Build — vcpkg.json pulls all dependencies automatically on first build
+# Build: vcpkg.json pulls all dependencies automatically on first build
 msbuild LuminaCpp\LuminaCpp.vcxproj /p:Configuration=Release /p:Platform=x64 /m
 msbuild LuminaShell\LuminaShell.vcxproj /p:Configuration=Release /p:Platform=x64 /m
 ```
@@ -116,6 +116,8 @@ Output lands in `x64\Release\`.
 ```powershell
 # Run as Administrator
 regsvr32 "x64\Release\LuminaShell.dll"
+# To unregister
+regsvr32 /u "x64\Release\LuminaShell.dll"
 ```
 
 **HEIC decoding note:** Lumina first tries the OS codec (HEIF Image Extensions, GPU-accelerated, pre-installed on most Windows 11 22H2+ systems). If unavailable, it falls back to the bundled libheif decoder automatically.
@@ -130,6 +132,6 @@ Map tiles and data are © [OpenStreetMap contributors](https://www.openstreetmap
 
 ## License
 
-MIT © 2025 AykQ — see [LICENSE](LICENSE).
+MIT © 2025 AykQ. See [LICENSE](LICENSE).
 
 Third-party libraries and their licenses are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

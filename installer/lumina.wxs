@@ -184,6 +184,19 @@
       <RegistryValue Root="HKLM" Key="SOFTWARE\RegisteredApplications" Name="Lumina" Value="SOFTWARE\Lumina\Capabilities" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities" Name="ApplicationName" Value="Lumina" Type="string" />
       <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities" Name="ApplicationDescription" Value="Fast native image viewer" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".jpg"  Value="Lumina.Image.JPG"  Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".jpeg" Value="Lumina.Image.JPG"  Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".png"  Value="Lumina.Image.PNG"  Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".gif"  Value="Lumina.Image.GIF"  Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".bmp"  Value="Lumina.Image.BMP"  Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".tiff" Value="Lumina.Image.TIFF" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".tif"  Value="Lumina.Image.TIFF" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".ico"  Value="Lumina.Image.ICO"  Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".webp" Value="Lumina.Image.WEBP" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".heic" Value="Lumina.Image.HEIC" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".heif" Value="Lumina.Image.HEIC" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".avif" Value="Lumina.Image.AVIF" Type="string" />
+      <RegistryValue Root="HKLM" Key="SOFTWARE\Lumina\Capabilities\FileAssociations" Name=".jxl"  Value="Lumina.Image.JXL"  Type="string" />
     </Component>
 
   </Package>

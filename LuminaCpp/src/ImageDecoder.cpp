@@ -16,8 +16,8 @@
 #include <jxl/decode.h>
 #include <jxl/codestream_header.h>
 #include <jxl/thread_parallel_runner.h>
-// jxl/encode.h intentionally excluded — JXL encoder objects in jxl.lib require
-// __std_rotate/__std_unique_4 (MSVC 17.7+ STL intrinsics) incompatible with v143 toolset.
+#include <jxl/encode.h>
+#include <brotli/decode.h>  // JXL "brob" (brotli-compressed) metadata boxes
 #include <avif/avif.h>
 
 #pragma comment(lib, "libwebpdemux.lib")
@@ -601,6 +601,28 @@ static WICBitmapTransformOptions ExifOrientationToTransform(UINT16 o)
     }
 }
 
+// Orientation: JPEG → /app1/ifd/..., TIFF/PNG → /ifd/...; yoksa 1
+static UINT16 WicReadOrientation(IWICMetadataQueryReader* mqr)
+{
+    UINT16 orientation = 1;
+    PROPVARIANT pvO;
+    PropVariantInit(&pvO);
+    bool gotOri = SUCCEEDED(mqr->GetMetadataByName(L"/app1/ifd/{ushort=274}", &pvO));
+    if (!gotOri)
+    {
+        PropVariantClear(&pvO);
+        PropVariantInit(&pvO);
+        gotOri = SUCCEEDED(mqr->GetMetadataByName(L"/ifd/{ushort=274}", &pvO));
+    }
+    if (gotOri)
+    {
+        if      (pvO.vt == VT_UI2) orientation = pvO.uiVal;
+        else if (pvO.vt == VT_UI4) orientation = static_cast<UINT16>(pvO.ulVal);
+    }
+    PropVariantClear(&pvO);
+    return orientation;
+}
+
 // ─── WIC frame metadata okuyucu ──────────────────────────────────────────────
 // EXIF, GPS ve ICC profil bilgilerini frame'den okur; piksellere dokunmaz.
 // orientation: EXIF yönelim değeri (1-8); iccDataOut: piksel dönüşümü için ham ICC baytları.
@@ -612,22 +634,7 @@ static void WicReadFrameMeta(IWICBitmapFrameDecode* frame, DecodeOutput& out,
     IWICMetadataQueryReader* mqr = nullptr;
     if (SUCCEEDED(frame->GetMetadataQueryReader(&mqr)) && mqr)
     {
-        // Orientation: JPEG → /app1/ifd/..., TIFF/PNG → /ifd/...
-        PROPVARIANT pvO;
-        PropVariantInit(&pvO);
-        bool gotOri = SUCCEEDED(mqr->GetMetadataByName(L"/app1/ifd/{ushort=274}", &pvO));
-        if (!gotOri)
-        {
-            PropVariantClear(&pvO);
-            PropVariantInit(&pvO);
-            gotOri = SUCCEEDED(mqr->GetMetadataByName(L"/ifd/{ushort=274}", &pvO));
-        }
-        if (gotOri)
-        {
-            if      (pvO.vt == VT_UI2) orientation = pvO.uiVal;
-            else if (pvO.vt == VT_UI4) orientation = static_cast<UINT16>(pvO.ulVal);
-        }
-        PropVariantClear(&pvO);
+        orientation = WicReadOrientation(mqr);
 
         // Make/model/date: JPEG = /app1/ifd/..., TIFF = /ifd/... (PNG eXIf de aynı)
         out.cameraMake   = WicQueryStr2(mqr, L"/app1/ifd/{ushort=271}",        L"/ifd/{ushort=271}");
@@ -1184,6 +1191,7 @@ static bool DecodeJXL(const std::wstring& path, DecodeOutput& out)
         }
         else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER)
         {
+            if (success && !isAnimated) break;  // still image already decoded; a further frame is not wanted
             size_t bufSize = 0;
             if (JxlDecoderImageOutBufferSize(dec, &fmt, &bufSize) != JXL_DEC_SUCCESS) break;
             frameBuf.resize(bufSize);
@@ -1209,13 +1217,14 @@ static bool DecodeJXL(const std::wstring& path, DecodeOutput& out)
                 PremultiplyBGRA(frame.pixels.data(), frame.width, frame.height);
                 out.frames.push_back(std::move(frame));
             }
-            else
+            else if (!success)
             {
                 out.width  = basicInfo.xsize;
                 out.height = basicInfo.ysize;
                 out.pixels = std::move(frameBuf);
                 success    = true;
-                break;
+                // keep looping: an "Exif" box written after the codestream is only reached
+                // by processing on to JXL_DEC_SUCCESS
             }
         }
         else if (status == JXL_DEC_SUCCESS)
@@ -1758,10 +1767,16 @@ static bool DecodeThumbWithWIC(const std::wstring& path, UINT targetH,
     frame->GetSize(&srcW, &srcH);
     if (srcW == 0 || srcH == 0) { frame->Release(); wic->Release(); return false; }
 
-    // En-boy oranını koru, hedef yüksekliğe ölçekle
-    UINT dstH = (srcH < targetH) ? srcH : targetH;
-    UINT dstW = srcW * dstH / srcH;
-    if (dstW < 1) dstW = 1;
+    // EXIF yönelimi: ana görüntüyle aynı yönde görünsün
+    UINT16 orientation = 1;
+    {
+        IWICMetadataQueryReader* mqr = nullptr;
+        if (SUCCEEDED(frame->GetMetadataQueryReader(&mqr)) && mqr)
+        {
+            orientation = WicReadOrientation(mqr);
+            mqr->Release();
+        }
+    }
 
     // Format dönüştürücü: 32bpp BGRA düz alfa
     IWICFormatConverter* converter = nullptr;
@@ -1774,13 +1789,36 @@ static bool DecodeThumbWithWIC(const std::wstring& path, UINT targetH,
     frame->Release();
     if (FAILED(hr)) { converter->Release(); wic->Release(); return false; }
 
+    IWICBitmapSource*      source  = converter;
+    IWICBitmapFlipRotator* rotator = nullptr;
+    const WICBitmapTransformOptions transform = ExifOrientationToTransform(orientation);
+    if (transform != WICBitmapTransformRotate0 && SUCCEEDED(wic->CreateBitmapFlipRotator(&rotator)))
+    {
+        if (SUCCEEDED(rotator->Initialize(converter, transform)))
+        {
+            source = rotator;
+            source->GetSize(&srcW, &srcH);  // 90/270 dönüşte w ve h yer değiştirir
+        }
+        else
+        {
+            rotator->Release();
+            rotator = nullptr;
+        }
+    }
+
+    // En-boy oranını koru, hedef yüksekliğe ölçekle
+    UINT dstH = (srcH < targetH) ? srcH : targetH;
+    UINT dstW = srcW * dstH / srcH;
+    if (dstW < 1) dstW = 1;
+
     // WIC scaler: Fant interpolation, doğrudan hedef boyuta
     // (lazy pull model — tam çözünürlük buffer tahsis edilmez)
     IWICBitmapScaler* scaler = nullptr;
     hr = wic->CreateBitmapScaler(&scaler);
-    if (FAILED(hr)) { converter->Release(); wic->Release(); return false; }
+    if (FAILED(hr)) { if (rotator) rotator->Release(); converter->Release(); wic->Release(); return false; }
 
-    hr = scaler->Initialize(converter, dstW, dstH, WICBitmapInterpolationModeFant);
+    hr = scaler->Initialize(source, dstW, dstH, WICBitmapInterpolationModeFant);
+    if (rotator) rotator->Release();
     converter->Release();
     if (FAILED(hr)) { scaler->Release(); wic->Release(); return false; }
 
@@ -2049,6 +2087,30 @@ static std::vector<uint8_t> NormalizeExifTiff(const uint8_t* d, size_t n)
     return std::vector<uint8_t>(d, d + n);
 }
 
+// Brotli stream -> bytes, capped so a crafted box cannot balloon memory
+static std::vector<uint8_t> BrotliInflate(const uint8_t* in, size_t inSize)
+{
+    constexpr size_t kMaxOut = 4u << 20;
+    std::vector<uint8_t> out;
+    BrotliDecoderState* st = BrotliDecoderCreateInstance(nullptr, nullptr, nullptr);
+    if (!st) return out;
+    uint8_t chunk[1 << 14];
+    size_t availIn = inSize;
+    const uint8_t* next = in;
+    BrotliDecoderResult r;
+    do
+    {
+        size_t availOut = sizeof(chunk);
+        uint8_t* nextOut = chunk;
+        r = BrotliDecoderDecompressStream(st, &availIn, &next, &availOut, &nextOut, nullptr);
+        out.insert(out.end(), chunk, nextOut);
+        if (out.size() > kMaxOut) { out.clear(); r = BROTLI_DECODER_RESULT_ERROR; }
+    } while (r == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT);
+    BrotliDecoderDestroyInstance(st);
+    if (r != BROTLI_DECODER_RESULT_SUCCESS) out.clear();
+    return out;
+}
+
 // Orientation is reset to 1 because the saved pixels are already upright.
 static std::vector<uint8_t> ExtractExifTiff(const std::wstring& srcPath)
 {
@@ -2096,6 +2158,50 @@ static std::vector<uint8_t> ExtractExifTiff(const std::wstring& srcPath)
                 WebPDemuxReleaseChunkIterator(&ci);
             }
             WebPDemuxDelete(dmx);
+        }
+    }
+    else if (n > 12 && memcmp(b.data(), "\0\0\0\x0c" "JXL \r\n\x87\n", 12) == 0)
+    {
+        // JXL container: ISO BMFF boxes; EXIF lives in an "Exif" box, or inside a "brob"
+        // wrapper (brotli) whose payload starts with the real 4-char type
+        size_t p = 0;
+        while (p + 8 <= n)
+        {
+            uint64_t sz = ReadBE32(&b[p]);
+            size_t   hdr = 8;
+            if (sz == 1)
+            {
+                if (p + 16 > n) break;
+                sz  = (uint64_t(ReadBE32(&b[p + 8])) << 32) | ReadBE32(&b[p + 12]);
+                hdr = 16;
+            }
+            else if (sz == 0) sz = n - p;
+            if (sz < hdr || sz > n - p) break;
+
+            const uint8_t* payload = &b[p + hdr];
+            const size_t   plen    = static_cast<size_t>(sz) - hdr;
+            if (memcmp(&b[p + 4], "Exif", 4) == 0)
+            { out = NormalizeExifTiff(payload, plen); break; }
+            if (memcmp(&b[p + 4], "brob", 4) == 0 && plen > 4 && memcmp(payload, "Exif", 4) == 0)
+            {
+                const auto raw = BrotliInflate(payload + 4, plen - 4);
+                if (!raw.empty()) out = NormalizeExifTiff(raw.data(), raw.size());
+                break;
+            }
+            p += static_cast<size_t>(sz);
+        }
+    }
+    else if (n > 12 && memcmp(&b[4], "ftyp", 4) == 0
+             && (memcmp(&b[8], "avif", 4) == 0 || memcmp(&b[8], "avis", 4) == 0))
+    {
+        if (avifDecoder* dec = avifDecoderCreate())
+        {
+            dec->ignoreExif = AVIF_FALSE;
+            if (avifDecoderSetIOMemory(dec, b.data(), n) == AVIF_RESULT_OK
+                && avifDecoderParse(dec) == AVIF_RESULT_OK
+                && dec->image && dec->image->exif.size > 0)
+                out = NormalizeExifTiff(dec->image->exif.data, dec->image->exif.size);
+            avifDecoderDestroy(dec);
         }
     }
     else if (n > 12 && memcmp(&b[4], "ftyp", 4) == 0)
@@ -2500,6 +2606,15 @@ static bool SaveImageWebP(const std::wstring& path, const uint8_t* bgraStraight,
     return ok;
 }
 
+// libheif's HEVC encoder defaults to its slowest-quality preset; a viewer's "convert"
+// button wants the fast one. Unknown parameter names (AV1 plugin) just return an
+// error, which is ignored on purpose.
+static void ApplyFastHeicPreset(heif_encoder* enc)
+{
+    heif_encoder_set_parameter(enc, "preset", "veryfast");
+    heif_encoder_set_parameter(enc, "tu-intra-depth", "1");
+}
+
 // HEIC encoder: libheif (HEVC; AV1 fallback)
 static bool SaveImageHEIC(const std::wstring& path, const uint8_t* bgraStraight,
                            UINT width, UINT height,
@@ -2515,6 +2630,7 @@ static bool SaveImageHEIC(const std::wstring& path, const uint8_t* bgraStraight,
     if (err.code != heif_error_Ok) { heif_context_free(ctx); return false; }
 
     heif_encoder_set_lossy_quality(enc, quality > 0 ? quality : 85);
+    ApplyFastHeicPreset(enc);
 
     bool hasAlpha = false;
     for (UINT i = 0; i < width * height; ++i)
@@ -2593,6 +2709,7 @@ static bool SaveImageHEIC(const std::wstring& path, const uint8_t* bgraStraight,
                     heif_context_get_encoder_for_format(ctx, heif_compression_AV1, &tEnc);
                 if (tEnc) {
                     heif_encoder_set_lossy_quality(tEnc, 60);
+                    ApplyFastHeicPreset(tEnc);
                     heif_encoding_options* tOpts   = heif_encoding_options_alloc();
                     heif_image_handle*     tHandle = nullptr;
                     heif_context_encode_thumbnail(ctx, tImg, outHandle, tEnc, tOpts, 512, &tHandle);
@@ -2623,18 +2740,108 @@ static bool SaveImageHEIC(const std::wstring& path, const uint8_t* bgraStraight,
     return ok;
 }
 
-// JXL encoder disabled — libjxl encoder objects require __std_rotate/__std_unique_4
-// (MSVC 17.7+ STL intrinsics) that are incompatible with the v143 toolset.
-// JXL decode (viewing) continues to work; only JXL save is unavailable.
-static bool SaveImageJXL(const std::wstring&, const uint8_t*, UINT, UINT)
+// JXL encoder: libjxl (lossy, VarDCT; EXIF goes into an "Exif" box)
+static bool SaveImageJXL(const std::wstring& path, const uint8_t* bgraStraight,
+                          UINT width, UINT height,
+                          const std::vector<uint8_t>& exifTiff, int quality = 0)
 {
-    return false;
+    bool hasAlpha = false;
+    for (size_t i = 0, n = static_cast<size_t>(width) * height; i < n; ++i)
+        if (bgraStraight[i * 4 + 3] < 255) { hasAlpha = true; break; }
+
+    const uint32_t channels = hasAlpha ? 4u : 3u;
+    const size_t   pixCount = static_cast<size_t>(width) * height;
+    std::vector<uint8_t> rgb(pixCount * channels);
+    for (size_t i = 0; i < pixCount; ++i)
+    {
+        const uint8_t* s = bgraStraight + i * 4;
+        uint8_t*       d = rgb.data() + i * channels;
+        d[0] = s[2]; d[1] = s[1]; d[2] = s[0];
+        if (hasAlpha) d[3] = s[3];
+    }
+
+    JxlEncoder* enc = JxlEncoderCreate(nullptr);
+    if (!enc) return false;
+    void* runner = JxlThreadParallelRunnerCreate(nullptr, JxlThreadParallelRunnerDefaultNumWorkerThreads());
+
+    auto finish = [&](bool ok) {
+        JxlEncoderDestroy(enc);
+        if (runner) JxlThreadParallelRunnerDestroy(runner);
+        return ok;
+    };
+
+    if (runner && JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner) != JXL_ENC_SUCCESS)
+        return finish(false);
+    if (!exifTiff.empty() && JxlEncoderUseBoxes(enc) != JXL_ENC_SUCCESS)
+        return finish(false);
+
+    JxlBasicInfo info;
+    JxlEncoderInitBasicInfo(&info);
+    info.xsize                    = width;
+    info.ysize                    = height;
+    info.bits_per_sample          = 8;
+    info.exponent_bits_per_sample = 0;
+    const bool lossless           = quality >= 100;  // distance 0 needs the original profile
+    info.uses_original_profile    = lossless ? JXL_TRUE : JXL_FALSE;
+    if (hasAlpha)
+    {
+        info.num_extra_channels = 1;
+        info.alpha_bits         = 8;
+        info.alpha_premultiplied = JXL_FALSE;
+    }
+    if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) return finish(false);
+
+    JxlColorEncoding color{};
+    JxlColorEncodingSetToSRGB(&color, JXL_FALSE);
+    if (JxlEncoderSetColorEncoding(enc, &color) != JXL_ENC_SUCCESS) return finish(false);
+
+    JxlEncoderFrameSettings* fs = JxlEncoderFrameSettingsCreate(enc, nullptr);
+    if (!fs) return finish(false);
+    if (lossless)
+        JxlEncoderSetFrameLossless(fs, JXL_TRUE);
+    else
+        JxlEncoderSetFrameDistance(fs, quality > 0 ? JxlEncoderDistanceFromQuality(static_cast<float>(quality)) : 1.0f);
+    JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, 5);
+
+    const JxlPixelFormat fmt = { channels, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0 };
+    if (JxlEncoderAddImageFrame(fs, &fmt, rgb.data(), rgb.size()) != JXL_ENC_SUCCESS)
+        return finish(false);
+
+    if (!exifTiff.empty())
+    {
+        // ISO BMFF Exif box: 4-byte big-endian offset to the TIFF header, then the TIFF data
+        std::vector<uint8_t> box(4 + exifTiff.size(), 0);
+        memcpy(box.data() + 4, exifTiff.data(), exifTiff.size());
+        if (JxlEncoderAddBox(enc, "Exif", box.data(), box.size(), JXL_FALSE) != JXL_ENC_SUCCESS)
+            return finish(false);
+    }
+    JxlEncoderCloseInput(enc);
+
+    std::vector<uint8_t> out(1u << 16);
+    uint8_t* next  = out.data();
+    size_t   avail = out.size();
+    JxlEncoderStatus status;
+    do
+    {
+        status = JxlEncoderProcessOutput(enc, &next, &avail);
+        if (status == JXL_ENC_NEED_MORE_OUTPUT)
+        {
+            const size_t used = static_cast<size_t>(next - out.data());
+            out.resize(out.size() * 2);
+            next  = out.data() + used;
+            avail = out.size() - used;
+        }
+    } while (status == JXL_ENC_NEED_MORE_OUTPUT);
+
+    if (status != JXL_ENC_SUCCESS) return finish(false);
+    out.resize(static_cast<size_t>(next - out.data()));
+    return finish(WriteAllBytes(path, out.data(), static_cast<DWORD>(out.size())));
 }
 
-// AVIF encoder: libavif (sourcePath varsa EXIF kopyalanır)
+// AVIF encoder: libavif + libaom (EXIF passed in as raw TIFF data)
 static bool SaveImageAVIF(const std::wstring& path, const uint8_t* bgraStraight,
                            UINT width, UINT height,
-                           const std::wstring& sourcePath = L"", int quality = 0)
+                           const std::vector<uint8_t>& exifTiff, int quality = 0)
 {
     bool hasAlpha = false;
     for (UINT i = 0; i < width * height; ++i)
@@ -2648,33 +2855,15 @@ static bool SaveImageAVIF(const std::wstring& path, const uint8_t* bgraStraight,
     img->matrixCoefficients      = AVIF_MATRIX_COEFFICIENTS_BT601;
     img->yuvRange                = AVIF_RANGE_FULL;
 
-    // Kaynak AVIF'ten EXIF al, Orientation'ı 1'e patch'le
-    if (!sourcePath.empty())
-    {
-        auto srcData = ReadFileBytes(sourcePath);
-        if (!srcData.empty())
-        {
-            avifDecoder* dec = avifDecoderCreate();
-            dec->ignoreExif = AVIF_FALSE;
-            avifResult r = avifDecoderSetIOMemory(dec, srcData.data(), srcData.size());
-            if (r == AVIF_RESULT_OK) r = avifDecoderParse(dec);
-            if (r == AVIF_RESULT_OK && dec->image && dec->image->exif.size > 0)
-            {
-                std::vector<uint8_t> exifBuf(dec->image->exif.data,
-                                             dec->image->exif.data + dec->image->exif.size);
-                PatchExifOrientation(exifBuf, 1);
-                // avifImageSetMetadataExif: irot/imir flag'lerini de ayarlar;
-                // orientation=1 → dönüşüm yok, pikseller fiziksel olarak doğru.
-                avifImageSetMetadataExif(img, exifBuf.data(), exifBuf.size());
-            }
-            avifDecoderDestroy(dec);
-        }
-    }
+    // Orientation is already 1 in exifTiff (pixels are upright), so no irot/imir is implied
+    if (!exifTiff.empty())
+        avifImageSetMetadataExif(img, exifTiff.data(), exifTiff.size());
 
     avifRGBImage rgb{};
     avifRGBImageSetDefaults(&rgb, img);
-    rgb.format = AVIF_RGB_FORMAT_BGRA;
-    rgb.depth  = 8;
+    rgb.format      = AVIF_RGB_FORMAT_BGRA;
+    rgb.depth       = 8;
+    rgb.ignoreAlpha = hasAlpha ? AVIF_FALSE : AVIF_TRUE;  // skip the alpha plane for opaque images
 
     if (avifRGBImageAllocatePixels(&rgb) != AVIF_RESULT_OK) {
         avifImageDestroy(img); return false;
@@ -2690,6 +2879,10 @@ static bool SaveImageAVIF(const std::wstring& path, const uint8_t* bgraStraight,
     encoder->quality      = quality > 0 ? quality : 80;
     encoder->qualityAlpha = 100;  // AVIF_QUALITY_LOSSLESS
     encoder->speed        = AVIF_SPEED_DEFAULT;
+    encoder->autoTiling   = AVIF_TRUE;  // lets libaom actually use several threads
+    SYSTEM_INFO avifSi{};
+    GetSystemInfo(&avifSi);
+    encoder->maxThreads   = static_cast<int>(avifSi.dwNumberOfProcessors);
 
     avifRWData output = AVIF_DATA_EMPTY;
     res = avifEncoderWrite(encoder, img, &output);
@@ -2768,8 +2961,8 @@ bool SaveImage(const std::wstring& path, const std::wstring& format,
                            return SaveImageWebP(path, px, width, height, exif, opts.quality, opts.lossless);
     if (format == L"HEIC" || format == L"HEIF")
                            return SaveImageHEIC(path, px, width, height, exif, opts.quality);
-    if (format == L"JXL")  return SaveImageJXL(path,  px, width, height);
-    if (format == L"AVIF") return SaveImageAVIF(path, px, width, height, sourcePath, opts.quality);
+    if (format == L"JXL")  return SaveImageJXL(path,  px, width, height, exif, opts.quality);
+    if (format == L"AVIF") return SaveImageAVIF(path, px, width, height, exif, opts.quality);
 
     // Bilinmeyen format → PNG olarak kaydet
     return SaveImageWIC(path, GUID_ContainerFormatPng, px, width, height);

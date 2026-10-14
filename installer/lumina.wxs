@@ -58,8 +58,10 @@
     </Component>
     <Component Id="ThirdPartyLicenseFiles" Directory="LICENSESFOLDER" Guid="56A86A66-B027-4581-A780-92AB976A0936">
       <File Id="Lic_brotli" Source="third-party-licenses\brotli.txt" KeyPath="yes" />
+      <File Id="Lic_dav1d" Source="third-party-licenses\dav1d.txt" />
       <File Id="Lic_highway" Source="third-party-licenses\highway.txt" />
       <File Id="Lic_lcms2" Source="third-party-licenses\lcms2.txt" />
+      <File Id="Lic_libaom" Source="third-party-licenses\libaom.txt" />
       <File Id="Lic_libavif" Source="third-party-licenses\libavif.txt" />
       <File Id="Lic_libde265" Source="third-party-licenses\libde265.txt" />
       <File Id="Lic_libheif" Source="third-party-licenses\libheif.txt" />

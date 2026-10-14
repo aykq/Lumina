@@ -38,6 +38,8 @@ inline constexpr ConvertFormatInfo kConvertFormats[] = {
     { L"HEIC", L"HEIC", L"heic", 85 },
     { L"BMP", L"BMP",  L"bmp",   0 },
     { L"TIFF", L"TIFF", L"tiff",  0 },
+    { L"JXL",  L"JXL",  L"jxl",  90 },
+    { L"AVIF", L"AVIF", L"avif", 80 },
 };
 inline constexpr int kConvertFormatCount = static_cast<int>(std::size(kConvertFormats));
 
@@ -194,7 +196,7 @@ struct ViewState
     // Silme onay dialogu
     bool  showDeleteConfirmDialog  = false;  // "Geri Dönüşüm Kutusu'na taşı?" onay ekranı
     bool  showUnsavedWarningDialog = false;  // "Kaydedilmemiş değişiklik" uyarı ekranı
-    int   noticeKind               = 0;      // 1 = conversion failed; reset to 0 wherever the unsaved warning is raised
+    int   noticeKind               = 0;      // 1 = conversion failed, 2 = save failed; reset to 0 wherever the unsaved warning is raised
     int   deleteDlgHoverBtn        = 0;      // 0=yok, 1=İptal/Tamam, 2=Sil
     int   deleteDlgPressedBtn      = 0;      // basılı buton (press highlight)
 

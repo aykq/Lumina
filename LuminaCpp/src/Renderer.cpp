@@ -1630,7 +1630,9 @@ void Renderer::DrawDeleteConfirmDialog(const ViewState& vs, const ImageInfo* inf
 
     // Başlık
     const bool convertFailed = isWarning && vs.noticeKind == 1;
+    const bool saveFailed    = isWarning && vs.noticeKind == 2;
     const wchar_t* title   = convertFailed ? L"Conversion Failed"
+                           : saveFailed    ? L"Save Failed"
                            : isWarning     ? L"Cannot Delete" : L"Delete Photo";
     D2D1_RECT_F titleRect  = D2D1::RectF(dlgLeft + kPadX, dlgTop + kPadY,
                                           dlgRight - kPadX, dlgTop + kPadY + 22.0f);
@@ -1643,6 +1645,11 @@ void Renderer::DrawDeleteConfirmDialog(const ViewState& vs, const ImageInfo* inf
     if (convertFailed)
     {
         msg = L"The image could not be converted.\n"
+              L"Check the destination and try again.";
+    }
+    else if (saveFailed)
+    {
+        msg = L"The image could not be saved.\n"
               L"Check the destination and try again.";
     }
     else if (isWarning)
@@ -1991,7 +1998,7 @@ void Renderer::DrawConvertDialog(const ViewState& vs)
         m_overlayBrush->SetOpacity(op);
     }
 
-    constexpr float kDlgW   = 460.0f;
+    constexpr float kDlgW   = 500.0f;  // 8 format buttons in one row
     constexpr float kDlgH   = 252.0f;
     constexpr float kRadii  = 12.0f;
     constexpr float kPadX   = 20.0f;

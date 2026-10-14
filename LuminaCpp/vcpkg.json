@@ -6,6 +6,12 @@
     "libwebp",
     "libheif",
     "libjxl",
-    "libavif"
+    {
+      "name": "libavif",
+      "features": [
+        "aom",
+        "dav1d"
+      ]
+    }
   ]
 }

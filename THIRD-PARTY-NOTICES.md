@@ -10,8 +10,10 @@ The full license text of each one is in [`third-party-licenses/`](third-party-li
 | libde265 | 1.0.16 | LGPL-3.0-or-later | HEVC decoding (used by libheif) | https://github.com/strukturag/libde265 |
 | x265 | 4.1 | GPL-2.0-or-later | HEVC encoder, pulled in by libheif's default `hevc` feature | https://bitbucket.org/multicoreware/x265_git |
 | libwebp | 1.6.0 | BSD-3-Clause | WebP decoding | https://chromium.googlesource.com/webm/libwebp |
-| libjxl | 0.11.2 | BSD-3-Clause | JPEG XL decoding | https://github.com/libjxl/libjxl |
-| libavif | 1.4.1 | BSD-2-Clause | AVIF decoding | https://github.com/AOMediaCodec/libavif |
+| libjxl | 0.11.2 | BSD-3-Clause | JPEG XL encoding and decoding | https://github.com/libjxl/libjxl |
+| libavif | 1.4.1 | BSD-2-Clause | AVIF encoding and decoding | https://github.com/AOMediaCodec/libavif |
+| libaom | 3.13.1 | BSD-2-Clause | AV1 encoding and decoding (used by libavif) | https://aomedia.googlesource.com/aom |
+| dav1d | 1.5.3 | BSD-2-Clause | AV1 decoding (used by libavif) | https://code.videolan.org/videolan/dav1d |
 | libyuv | 1916 | BSD-3-Clause | Pixel format conversion | https://chromium.googlesource.com/libyuv/libyuv |
 | libjpeg-turbo | 3.1.4.1 | IJG / BSD-3-Clause / Zlib | JPEG codec (dependency) | https://github.com/libjpeg-turbo/libjpeg-turbo |
 | Highway | 1.3.0 | Apache-2.0 | SIMD helpers (used by libjxl) | https://github.com/google/highway |

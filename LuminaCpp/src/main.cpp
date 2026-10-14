@@ -4357,6 +4357,22 @@ static LRESULT On_WM_SAVE_DONE(HWND hwnd, LPARAM lParam)
         KillTimer(hwnd, kEditToolbarFadeTimerID);
         KillTimer(hwnd, kEditToolbarIdleTimerID);
         SetTimer(hwnd, kEditToolbarIdleTimerID, 2000, nullptr);
+        if (g_edit.width > 0 && g_edit.height > 0)
+        {
+            // Info panel reads g_imageInfo; keep it in step with what was just written
+            g_imageInfo.width  = static_cast<int>(g_edit.width);
+            g_imageInfo.height = static_cast<int>(g_edit.height);
+            g_imageInfo.format = r->format;
+            WIN32_FILE_ATTRIBUTE_DATA fad{};
+            if (GetFileAttributesExW(r->savedPath.c_str(), GetFileExInfoStandard, &fad))
+                g_imageInfo.fileSizeBytes =
+                    (static_cast<int64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+            if (r->isSaveAs)
+            {
+                const auto sep = r->savedPath.find_last_of(L"\\/");
+                g_imageInfo.filename = (sep != std::wstring::npos) ? r->savedPath.substr(sep + 1) : r->savedPath;
+            }
+        }
         {
             std::lock_guard<std::mutex> lk(g_metaCacheMutex);
             g_metaCache.erase(r->savedPath);
@@ -4407,6 +4423,17 @@ static LRESULT On_WM_SAVE_DONE(HWND hwnd, LPARAM lParam)
                 }
             g_renderer->LoadThumbnail(r->savedPath, tp.data(), thumbW, thumbH);
         }
+    }
+    else
+    {
+        g_viewState.noticeKind = 2;
+        g_viewState.showUnsavedWarningDialog = true;
+        g_viewState.deleteDlgHoverBtn   = 0;
+        g_viewState.deleteDlgPressedBtn = 0;
+        g_viewState.dialogAlpha = 0.0f;
+        QueryPerformanceCounter(&g_dialogFadeLastTime);
+        KillTimer(hwnd, kDialogFadeTimerID);
+        SetTimer(hwnd, kDialogFadeTimerID, kAnimIntervalMs, nullptr);
     }
     delete r;
     InvalidateRect(hwnd, nullptr, FALSE);

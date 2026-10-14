@@ -1,5 +1,6 @@
 #include "ImageDecoder.h"
 
+#include <algorithm>
 #include <wincodec.h>
 #include <wincodecsdk.h>   // IWICMetadataBlockReader/Writer, IWICMetadataQueryWriter
 #include <cwchar>
@@ -2218,10 +2219,11 @@ static void ApplyExifToWicFrame(IWICBitmapFrameEncode* frame, const std::vector<
     };
 
     enum Scope { kIfd0, kExif, kGps };
+    size_t budget = 64 * 1024;  // caps total copied bytes so crafted entries sharing one offset cannot amplify work
     auto copyIfd = [&](auto&& self, size_t ifd, const wchar_t* prefix, Scope scope) -> void
     {
         if (ifd + 2 > sz) return;
-        const uint16_t count = rd16(ifd);
+        const uint16_t count = std::min<uint16_t>(rd16(ifd), 512);
         for (uint16_t i = 0; i < count; ++i)
         {
             const size_t e = ifd + 2 + static_cast<size_t>(i) * 12;
@@ -2240,7 +2242,8 @@ static void ApplyExifToWicFrame(IWICBitmapFrameEncode* frame, const std::vector<
             const size_t total = kUnit[type] * cnt;
             size_t at = e + 8;
             if (total > 4) at = rd32(e + 8);
-            if (at + total > sz || total > 4096) continue;
+            if (at + total > sz || total > 4096 || total > budget) continue;
+            budget -= total;
 
             PROPVARIANT pv;
             PropVariantInit(&pv);
